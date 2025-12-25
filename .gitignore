@@ -1,0 +1,124 @@
+# CMake build directories
+build/
+cmake-build-*/
+out/
+bin/
+lib/
+
+# CMake cache and files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.cmake
+!CMakeLists.txt
+
+# Compiled Object files
+*.o
+*.obj
+*.lo
+*.slo
+
+# Compiled Dynamic libraries
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Compiled Static libraries
+*.a
+*.lib
+*.la
+
+# Executables
+*.exe
+*.out
+*.app
+PRIM_sim
+PRIM_sim.exe
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Visual Studio files
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+x64/
+x86/
+Debug/
+Release/
+MinSizeRel/
+RelWithDebInfo/
+
+# Visual Studio Code
+.vscode/
+*.code-workspace
+
+# CLion / JetBrains IDEs
+.idea/
+cmake-build-*/
+
+# Xcode
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# OS-specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*~
+
+# vcpkg
+vcpkg_installed/
+.vcpkg/
+
+# Package managers
+conan/
+*.conan
+
+# Cache and temporary files
+*.swp
+*.swo
+*.tmp
+*.log
+*.bak
+*.cache
+
+# Testing
+Testing/
+CTestTestfile.cmake
+
+# Coverage
+*.gcno
+*.gcda
+*.gcov
+coverage/
+lcov.info
+
+# Dependencies (if not using submodules/vcpkg)
+external/vcpkg/
+!external/imgui/
+
+# ImGui specific (keep the library)
+!external/imgui/**
+
+# Misc
+*.orig
+.ninja_deps
+.ninja_log
+compile_commands.json

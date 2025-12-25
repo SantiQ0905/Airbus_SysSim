@@ -1,0 +1,127 @@
+name: Build and Validate
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        build_type: [Release, Debug]
+        include:
+          - os: ubuntu-latest
+            triplet: x64-linux
+          - os: windows-latest
+            triplet: x64-windows
+          - os: macos-latest
+            triplet: x64-osx
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+
+    - name: Set up vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: 'a42af01b72c28a8e1d7b48107b33e4f286a55ef6'
+
+    - name: Install system dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          cmake \
+          ninja-build \
+          libx11-dev \
+          libxrandr-dev \
+          libxinerama-dev \
+          libxcursor-dev \
+          libxi-dev \
+          libgl1-mesa-dev
+
+    - name: Install system dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install cmake ninja
+
+    - name: Configure CMake
+      run: |
+        cmake -B build \
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+          -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake \
+          -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+          -G Ninja
+
+    - name: Build
+      run: cmake --build build --config ${{ matrix.build_type }} --parallel
+
+    - name: Check build artifacts
+      run: |
+        ls -la build/
+
+    - name: Upload build artifacts
+      if: matrix.build_type == 'Release'
+      uses: actions/upload-artifact@v4
+      with:
+        name: PRIM_sim-${{ runner.os }}-${{ matrix.build_type }}
+        path: |
+          build/PRIM_sim*
+          !build/**/*.o
+          !build/**/*.obj
+        retention-days: 7
+
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Check for trailing whitespace
+      run: |
+        ! git grep -I --line-number --perl-regexp '\s+$' -- '*.cpp' '*.h' '*.hpp'
+
+    - name: Check file encodings
+      run: |
+        find . -name "*.cpp" -o -name "*.h" -o -name "*.hpp" | xargs file | grep -v "UTF-8\|ASCII" && exit 1 || exit 0
+
+    - name: Check CMakeLists formatting
+      run: |
+        if [ -f CMakeLists.txt ]; then
+          echo "CMakeLists.txt exists"
+        else
+          echo "CMakeLists.txt not found!"
+          exit 1
+        fi
+
+  validation-summary:
+    name: Validation Summary
+    runs-on: ubuntu-latest
+    needs: [build, code-quality]
+    if: always()
+
+    steps:
+    - name: Check build status
+      run: |
+        if [ "${{ needs.build.result }}" == "success" ] && [ "${{ needs.code-quality.result }}" == "success" ]; then
+          echo "✅ All validation checks passed!"
+          exit 0
+        else
+          echo "❌ Some validation checks failed"
+          echo "Build: ${{ needs.build.result }}"
+          echo "Code Quality: ${{ needs.code-quality.result }}"
+          exit 1
+        fi
