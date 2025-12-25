@@ -1,6 +1,6 @@
 # AIRBUS PRIM Flight Control Simulator
 
-![Build Status](https://github.com/YOUR_USERNAME/PRIM_sim/workflows/Build%20and%20Validate/badge.svg)
+![Build Status](https://github.com/SantiQ0905/Airbus_SysSim/workflows/Build%20and%20Validate/badge.svg)
 
 A high-fidelity Airbus Primary Flight Control Computer (PRIM) simulator with realistic flight dynamics, ECAM displays, and Airbus-style protections.
 
