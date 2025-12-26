@@ -15,6 +15,7 @@ struct Sensors {
     float tat_c = -10.0f;
     float pitch_deg = 0.0f;
     float roll_deg = 0.0f;
+    float heading_deg = 0.0f;  // Magnetic heading (0-359)
 };
 
 struct PilotInput {
@@ -71,4 +72,18 @@ struct FlightControlStatus {
     bool alpha_prot = false;
     bool alpha_floor = false;
     bool high_speed_prot = false;
+};
+
+struct AutopilotState {
+    bool spd_mode = false;      // Speed hold mode
+    bool hdg_mode = false;      // Heading hold mode
+    bool alt_mode = false;      // Altitude hold mode
+    bool vs_mode = false;       // Vertical speed mode
+
+    float target_spd_knots = 250.0f;  // Target speed
+    float target_hdg_deg = 0.0f;      // Target heading
+    float target_alt_ft = 10000.0f;   // Target altitude
+    float target_vs_fpm = 0.0f;       // Target vertical speed
+
+    bool was_active_last_frame = false; // Internal tracking for disconnect detection
 };

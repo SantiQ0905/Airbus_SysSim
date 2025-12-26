@@ -10,7 +10,7 @@
 static float clampf(float v, float lo, float hi) { return std::max(lo, std::min(hi, v)); }
 static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 
-void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f, float dt_sec, AlertManager& am) {
+void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f, float dt_sec, AlertManager& am, AutopilotState& ap) {
     // ========== Update Flight Control Status ==========
     fctl_status_.elac1_avail = !f.elac1_fail;
     fctl_status_.elac2_avail = !f.elac2_fail;
@@ -38,19 +38,44 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     // High speed protection
     fctl_status_.high_speed_prot = (s.ias_knots > 340.0f) || (s.mach > 0.82f);
 
+    // ========== Autopilot Disconnect Detection ==========
+    bool ap_currently_active = ap.spd_mode || ap.hdg_mode || ap.alt_mode || ap.vs_mode;
+    bool ap_just_disconnected = ap.was_active_last_frame && !ap_currently_active;
+    ap.was_active_last_frame = ap_currently_active;
+
     // ========== Publish Alerts ==========
-    am.set(100, AlertLevel::CAUTION, "ADR 1 FAULT", f.adr1_fail, true);
+    am.set(100, AlertLevel::CAUTION, "ADR 1 FAULT", f.adr1_fail, true, {
+        "* ADR 1 ............ OFF",
+        "* ATT HDG ........... CHECK",
+        "* USE ADR 2 OR 3"
+    });
 
     bool overspeed = (!f.overspeed_sensor_bad) && (s.ias_knots > 330.0f);
     am.set(200, AlertLevel::WARNING, "OVERSPEED", overspeed, false);
-    am.set(210, AlertLevel::CAUTION, "SPD SENS FAULT", f.overspeed_sensor_bad, true);
+    am.set(210, AlertLevel::CAUTION, "SPD SENS FAULT", f.overspeed_sensor_bad, true, {
+        "* REDUCE SPEED",
+        "* SPD LIM ........... 320 / .82",
+        "* MONITOR ALTITUDE"
+    });
 
     bool stall = (!f.adr1_fail) && (s.ias_knots < 140.0f) && (s.aoa_deg > 12.0f);
     am.set(300, AlertLevel::WARNING, "STALL", stall, false);
 
-    am.set(400, AlertLevel::CAUTION, "ELAC 1 FAULT", f.elac1_fail, true);
-    am.set(401, AlertLevel::CAUTION, "ELAC 2 FAULT", f.elac2_fail, true);
-    am.set(402, AlertLevel::CAUTION, "SEC 1 FAULT", f.sec1_fail, true);
+    // PULL UP warning (GPWS-style terrain alert)
+    bool pull_up = (!f.adr1_fail) && (s.altitude_ft < 2500.0f) && (s.vs_fpm < -1500.0f);
+    am.set(310, AlertLevel::WARNING, "PULL UP", pull_up, false);
+
+    am.set(400, AlertLevel::CAUTION, "ELAC 1 FAULT", f.elac1_fail, true, {
+        "* FLT CTL .......... LIMITED",
+        "* LAND ASAP"
+    });
+    am.set(401, AlertLevel::CAUTION, "ELAC 2 FAULT", f.elac2_fail, true, {
+        "* FLT CTL .......... LIMITED",
+        "* LAND ASAP"
+    });
+    am.set(402, AlertLevel::CAUTION, "SEC 1 FAULT", f.sec1_fail, true, {
+        "* FLT CTL .......... DEGRADED"
+    });
 
     // Control law degradation messages
     bool alt_law = (fctl_status_.law == ControlLaw::ALTERNATE);
@@ -58,14 +83,26 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     am.set(410, AlertLevel::MEMO, "ALTN LAW", alt_law, false);
     am.set(411, AlertLevel::WARNING, "DIRECT LAW", direct_law, false);
 
-    am.set(500, AlertLevel::WARNING, "ELEV JAM", f.elevator_jam, true);
-    am.set(510, AlertLevel::WARNING, "AIL JAM", f.aileron_jam, true);
+    am.set(500, AlertLevel::WARNING, "ELEV JAM", f.elevator_jam, true, {
+        "* AP ............... OFF",
+        "* USE MANUAL PITCH TRIM",
+        "* LAND ASAP"
+    });
+    am.set(510, AlertLevel::WARNING, "AIL JAM", f.aileron_jam, true, {
+        "* AP ............... OFF",
+        "* USE RUDDER FOR LATERAL CTRL",
+        "* LAND ASAP"
+    });
 
     am.set(600, AlertLevel::CAUTION, "ALPHA FLOOR INOP", f.alpha_floor_fail, true);
 
     // Protection messages
     am.set(700, AlertLevel::MEMO, "ALPHA PROT", fctl_status_.alpha_prot, false);
     am.set(710, AlertLevel::MEMO, "ALPHA FLOOR ACTIVE", fctl_status_.alpha_floor, false);
+
+    // AP Disconnect warning (triggers master warning like in real Airbus)
+    // Latch it so it stays on screen until acknowledged
+    am.set(800, AlertLevel::WARNING, "AP OFF", ap_just_disconnected, true);
 
     // NORMAL memo only if no cautions/warnings shown
     bool haveAnyNonMemo = false;
@@ -95,11 +132,41 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
             break;
     }
 
+    // ========== Autopilot Adjustments ==========
+    float effective_pitch = pilot.pitch;
+    float effective_roll = pilot.roll;
+
+    // HEADING MODE: Adjust roll to maintain target heading
+    if (ap.hdg_mode) {
+        // Calculate shortest heading error (handles 359->0 wraparound)
+        float hdg_error = ap.target_hdg_deg - s.heading_deg;
+        if (hdg_error > 180.0f) hdg_error -= 360.0f;
+        if (hdg_error < -180.0f) hdg_error += 360.0f;
+
+        // Proportional controller: heading error -> desired roll
+        float target_roll = clampf(hdg_error * 0.5f, -25.0f, 25.0f); // Max 25 deg bank
+        float roll_error = target_roll - s.roll_deg;
+        effective_roll = clampf(roll_error * 0.04f, -1.0f, 1.0f);
+    }
+
+    // ALTITUDE MODE: Adjust pitch to maintain target altitude (overrides VS mode)
+    if (ap.alt_mode) {
+        float alt_error = ap.target_alt_ft - s.altitude_ft;
+        float target_vs = clampf(alt_error * 2.0f, -2000.0f, 2000.0f); // Proportional controller
+        float vs_error = target_vs - s.vs_fpm;
+        effective_pitch = clampf(vs_error * 0.0002f, -1.0f, 1.0f);
+    }
+    // VERTICAL SPEED MODE: Adjust pitch to achieve target VS (only if ALT mode is off)
+    else if (ap.vs_mode) {
+        float vs_error = ap.target_vs_fpm - s.vs_fpm;
+        effective_pitch = clampf(vs_error * 0.0003f, -1.0f, 1.0f);
+    }
+
     // Alpha floor adds nose-up pitch (auto pitch up when alpha floor active)
     float alpha_floor_pitch = fctl_status_.alpha_floor ? 0.3f : 0.0f;
 
-    elevator_cmd_deg_ = (pilot.pitch + alpha_floor_pitch) * elevator_max_deg * elevator_authority;
-    aileron_cmd_deg_ = pilot.roll * aileron_max_deg * aileron_authority;
+    elevator_cmd_deg_ = (effective_pitch + alpha_floor_pitch) * elevator_max_deg * elevator_authority;
+    aileron_cmd_deg_ = effective_roll * aileron_max_deg * aileron_authority;
 
     // Apply jams
     if (f.elevator_jam) elevator_cmd_deg_ = surfaces_.elevator_deg;
@@ -116,8 +183,18 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     surfaces_.aileron_deg = clampf(surfaces_.aileron_deg, -aileron_max_deg, aileron_max_deg);
 }
 
-void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPosition flaps, float dt_sec) {
+void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPosition flaps, float dt_sec, const AutopilotState& ap) {
     // Improved flight dynamics model - more realistic and less aggressive
+
+    // ========== Autopilot Speed Control ==========
+    float effective_thrust = pilot.thrust;
+
+    // SPEED MODE: Adjust thrust to reach target speed
+    if (ap.spd_mode) {
+        float speed_error = ap.target_spd_knots - s.ias_knots;
+        float thrust_adjustment = speed_error * 0.003f; // P-controller gain
+        effective_thrust = clampf(pilot.thrust + thrust_adjustment, 0.0f, 1.0f);
+    }
 
     // ========== Flaps Effects ==========
     // Flaps increase lift (allows slower flight) and increase drag
@@ -164,6 +241,16 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
     s.roll_deg += roll_rate_dps * dt_sec;
     s.roll_deg = clampf(s.roll_deg, -60.0f, 60.0f);
 
+    // ========== Heading Dynamics ==========
+    // Turn rate depends on roll angle (coordinated turn)
+    // At 30 degrees bank, standard rate turn is ~3 deg/sec
+    float turn_rate_dps = std::sin(s.roll_deg * 3.14159f / 180.0f) * 6.0f; // deg/sec
+    s.heading_deg += turn_rate_dps * dt_sec;
+
+    // Wrap heading to 0-359 range
+    while (s.heading_deg < 0.0f) s.heading_deg += 360.0f;
+    while (s.heading_deg >= 360.0f) s.heading_deg -= 360.0f;
+
     // ========== Altitude & Vertical Speed ==========
     float target_vs = s.pitch_deg * 200.0f; // fpm
     float vs_alpha = 1.0f - std::exp(-2.0f * dt_sec);
@@ -175,7 +262,7 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
     // Much stronger thrust, less aggressive drag
 
     // Thrust force (significantly increased from before)
-    float thrust_force = pilot.thrust * 60.0f; // kt/sec max acceleration
+    float thrust_force = effective_thrust * 60.0f; // kt/sec max acceleration
 
     // Base drag (much reduced)
     float speed_ratio = s.ias_knots / 280.0f;
@@ -230,10 +317,10 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
 
     // ========== Engine Simulation ==========
     // Update engine parameters based on thrust setting
-    float target_n1 = 20.0f + pilot.thrust * 80.0f; // 20% idle to 100% TOGA
-    float target_n2 = 50.0f + pilot.thrust * 50.0f; // 50% idle to 100% TOGA
-    float target_egt = 300.0f + pilot.thrust * 600.0f; // EGT increases with thrust
-    float target_ff = 300.0f + pilot.thrust * 2700.0f; // Fuel flow kg/hr per engine
+    float target_n1 = 20.0f + effective_thrust * 80.0f; // 20% idle to 100% TOGA
+    float target_n2 = 50.0f + effective_thrust * 50.0f; // 50% idle to 100% TOGA
+    float target_egt = 300.0f + effective_thrust * 600.0f; // EGT increases with thrust
+    float target_ff = 300.0f + effective_thrust * 2700.0f; // Fuel flow kg/hr per engine
 
     // Smooth engine spool-up/down
     float engine_alpha = 1.0f - std::exp(-1.5f * dt_sec);

@@ -207,6 +207,40 @@ void DrawEcamPanel(AlertManager& alerts, Sensors& sensors, PilotInput& pilot, Fa
         ImGui::Spacing();
     }
 
+    // ECAM Actions section (all alerts with actions, stacked)
+    std::vector<const Alert*> alerts_with_actions;
+
+    // Collect all warnings with actions first (highest priority)
+    for (auto* a : warnings) {
+        if (!a->ecam_actions.empty()) {
+            alerts_with_actions.push_back(a);
+        }
+    }
+
+    // Then collect all cautions with actions
+    for (auto* a : cautions) {
+        if (!a->ecam_actions.empty()) {
+            alerts_with_actions.push_back(a);
+        }
+    }
+
+    if (!alerts_with_actions.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
+        ImGui::Text("ECAM ACTIONS:");
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+
+        // Display all actions from all active alerts
+        for (const auto* alert : alerts_with_actions) {
+            for (const auto& action : alert->ecam_actions) {
+                ImGui::TextColored(ImColor(AirbusColors::WHITE), "  %s", action.c_str());
+            }
+        }
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+    }
+
     // Memos section
     ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::CYAN);
     auto memos = alerts.getShownSorted(AlertLevel::MEMO);
@@ -228,7 +262,7 @@ static void DrawArtificialHorizon(ImVec2 center, float radius, float pitch_deg, 
 
     // Calculate horizon line position (pitch affects Y offset)
     float pitch_pixels_per_deg = radius / 15.0f; // 15 degrees fills half the ball
-    float pitch_offset = -pitch_deg * pitch_pixels_per_deg;
+    float pitch_offset = pitch_deg * pitch_pixels_per_deg;
 
     // Roll rotation
     float roll_rad = roll_deg * 3.14159f / 180.0f;
@@ -289,7 +323,7 @@ static void DrawArtificialHorizon(ImVec2 center, float radius, float pitch_deg, 
     for (int pitch_line = -30; pitch_line <= 30; pitch_line += 10) {
         if (pitch_line == 0) continue; // Skip horizon line
 
-        float line_y = center.y + pitch_offset - pitch_line * pitch_pixels_per_deg;
+        float line_y = center.y + pitch_offset + pitch_line * pitch_pixels_per_deg;
         float line_half_width = (pitch_line % 20 == 0) ? 40.0f : 25.0f;
 
         ImVec2 left = rotate_point(ImVec2(center.x - line_half_width, line_y));
@@ -508,6 +542,12 @@ void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput
                       (sensors.aoa_deg > 8.0f) ? AirbusColors::AMBER : AirbusColors::GREEN;
     draw_list->AddText(aoa_pos, aoa_color, aoa_text);
 
+    // Heading (top center)
+    ImVec2 hdg_pos = ImVec2(canvas_pos.x + canvas_size.x * 0.5f - 30, canvas_pos.y + 10);
+    char hdg_text[32];
+    snprintf(hdg_text, sizeof(hdg_text), "HDG %03.0f°", sensors.heading_deg);
+    draw_list->AddText(hdg_pos, AirbusColors::CYAN, hdg_text);
+
     // Mach number (bottom center)
     ImVec2 mach_pos = ImVec2(canvas_pos.x + canvas_size.x * 0.5f - 40, canvas_pos.y + canvas_size.y - 30);
     char mach_text[32];
@@ -723,6 +763,7 @@ void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, 
         ImGui::SliderFloat("Altitude (ft)", &sensors.altitude_ft, 0.0f, 45000.0f, "%.0f");
         ImGui::SliderFloat("V/S (fpm)", &sensors.vs_fpm, -6000.0f, 6000.0f, "%.0f");
         ImGui::SliderFloat("AoA (deg)", &sensors.aoa_deg, -5.0f, 25.0f, "%.1f");
+        ImGui::SliderFloat("Heading (deg)", &sensors.heading_deg, 0.0f, 359.0f, "%.0f");
         ImGui::SliderFloat("Mach", &sensors.mach, 0.0f, 0.85f, "%.3f");
         ImGui::SliderFloat("Pitch (deg)", &sensors.pitch_deg, -30.0f, 30.0f, "%.1f");
         ImGui::SliderFloat("Roll (deg)", &sensors.roll_deg, -60.0f, 60.0f, "%.1f");
@@ -736,6 +777,7 @@ void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, 
         ImGui::SliderFloat("Altitude (ft)", &sensors.altitude_ft, 0.0f, 45000.0f, "%.0f");
         ImGui::SliderFloat("V/S (fpm)", &sensors.vs_fpm, -6000.0f, 6000.0f, "%.0f");
         ImGui::SliderFloat("AoA (deg)", &sensors.aoa_deg, -5.0f, 25.0f, "%.1f");
+        ImGui::SliderFloat("Heading (deg)", &sensors.heading_deg, 0.0f, 359.0f, "%.0f");
 
         ImGui::EndDisabled();
         ImGui::PopStyleColor(2);
@@ -764,6 +806,192 @@ void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, 
     ImGui::Checkbox("Elevator Jam", &faults.elevator_jam);
     ImGui::Checkbox("Aileron Jam", &faults.aileron_jam);
     ImGui::Checkbox("Alpha Floor Fail", &faults.alpha_floor_fail);
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+}
+
+// ================================
+// Autopilot Control Panel (FCU-style)
+// ================================
+void DrawAutopilotPanel(AutopilotState& ap, const Sensors& sensors) {
+    ImGui::SetNextWindowPos(ImVec2(460, 730), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(820, 160), ImGuiCond_Once);
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
+    ImGui::Begin("AUTOPILOT / FCU", nullptr, ImGuiWindowFlags_NoResize);
+
+    TextCentered("FLIGHT CONTROL UNIT", AirbusColors::CYAN);
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // Layout: 4 columns for SPD, HDG, ALT, VS
+    ImGui::Columns(4, nullptr, false);
+
+    // ===== SPEED COLUMN =====
+    ImGui::BeginChild("SPD_Section", ImVec2(0, 80), true);
+    TextCentered("SPEED", AirbusColors::CYAN);
+    ImGui::Separator();
+
+    // Mode button
+    ImU32 spd_btn_color = ap.spd_mode ? AirbusColors::GREEN : IM_COL32(60, 60, 60, 255);
+    ImGui::PushStyleColor(ImGuiCol_Button, spd_btn_color);
+    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
+    if (ImGui::Button("SPD", ImVec2(60, 25))) {
+        ap.spd_mode = !ap.spd_mode;
+        if (ap.spd_mode) {
+            // Sync target to current speed when mode is enabled
+            ap.target_spd_knots = sensors.ias_knots;
+        }
+    }
+    ImGui::PopStyleColor(2);
+
+    // Target value
+    ImGui::PushItemWidth(120);
+    if (ap.spd_mode) {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 80, 0, 255));
+        ImGui::DragFloat("##spd_target", &ap.target_spd_knots, 1.0f, 100.0f, 350.0f, "%.0f kt");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(40, 40, 40, 255));
+        ImGui::BeginDisabled();
+        ImGui::DragFloat("##spd_target", &ap.target_spd_knots, 1.0f, 100.0f, 350.0f, "%.0f kt");
+        ImGui::EndDisabled();
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopItemWidth();
+
+    // Current value display
+    ImGui::TextColored(ImColor(IM_COL32(150, 150, 150, 255)), "CUR: %.0f kt", sensors.ias_knots);
+
+    ImGui::EndChild();
+    ImGui::NextColumn();
+
+    // ===== HEADING COLUMN =====
+    ImGui::BeginChild("HDG_Section", ImVec2(0, 80), true);
+    TextCentered("HEADING", AirbusColors::CYAN);
+    ImGui::Separator();
+
+    ImU32 hdg_btn_color = ap.hdg_mode ? AirbusColors::GREEN : IM_COL32(60, 60, 60, 255);
+    ImGui::PushStyleColor(ImGuiCol_Button, hdg_btn_color);
+    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
+    if (ImGui::Button("HDG", ImVec2(60, 25))) {
+        ap.hdg_mode = !ap.hdg_mode;
+        if (ap.hdg_mode) {
+            // Sync target to current heading when mode is enabled
+            ap.target_hdg_deg = sensors.heading_deg;
+        }
+    }
+    ImGui::PopStyleColor(2);
+
+    ImGui::PushItemWidth(120);
+    if (ap.hdg_mode) {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 80, 0, 255));
+        ImGui::DragFloat("##hdg_target", &ap.target_hdg_deg, 1.0f, 0.0f, 359.0f, "%.0f°");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(40, 40, 40, 255));
+        ImGui::BeginDisabled();
+        ImGui::DragFloat("##hdg_target", &ap.target_hdg_deg, 1.0f, 0.0f, 359.0f, "%.0f°");
+        ImGui::EndDisabled();
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopItemWidth();
+
+    ImGui::TextColored(ImColor(IM_COL32(150, 150, 150, 255)), "CUR: %.0f°", sensors.heading_deg);
+
+    ImGui::EndChild();
+    ImGui::NextColumn();
+
+    // ===== ALTITUDE COLUMN =====
+    ImGui::BeginChild("ALT_Section", ImVec2(0, 80), true);
+    TextCentered("ALTITUDE", AirbusColors::CYAN);
+    ImGui::Separator();
+
+    ImU32 alt_btn_color = ap.alt_mode ? AirbusColors::GREEN : IM_COL32(60, 60, 60, 255);
+    ImGui::PushStyleColor(ImGuiCol_Button, alt_btn_color);
+    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
+    if (ImGui::Button("ALT", ImVec2(60, 25))) {
+        ap.alt_mode = !ap.alt_mode;
+        if (ap.alt_mode) {
+            // Sync target to current altitude when mode is enabled
+            ap.target_alt_ft = sensors.altitude_ft;
+        }
+    }
+    ImGui::PopStyleColor(2);
+
+    ImGui::PushItemWidth(120);
+    if (ap.alt_mode) {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 80, 0, 255));
+        ImGui::DragFloat("##alt_target", &ap.target_alt_ft, 100.0f, 0.0f, 45000.0f, "%.0f ft");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(40, 40, 40, 255));
+        ImGui::BeginDisabled();
+        ImGui::DragFloat("##alt_target", &ap.target_alt_ft, 100.0f, 0.0f, 45000.0f, "%.0f ft");
+        ImGui::EndDisabled();
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopItemWidth();
+
+    ImGui::TextColored(ImColor(IM_COL32(150, 150, 150, 255)), "CUR: %.0f ft", sensors.altitude_ft);
+
+    ImGui::EndChild();
+    ImGui::NextColumn();
+
+    // ===== VERTICAL SPEED COLUMN =====
+    ImGui::BeginChild("VS_Section", ImVec2(0, 80), true);
+    TextCentered("VERT SPEED", AirbusColors::CYAN);
+    ImGui::Separator();
+
+    ImU32 vs_btn_color = ap.vs_mode ? AirbusColors::GREEN : IM_COL32(60, 60, 60, 255);
+    ImGui::PushStyleColor(ImGuiCol_Button, vs_btn_color);
+    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
+    if (ImGui::Button("V/S", ImVec2(60, 25))) {
+        ap.vs_mode = !ap.vs_mode;
+        if (ap.vs_mode) {
+            // Sync target to current VS when mode is enabled
+            ap.target_vs_fpm = sensors.vs_fpm;
+        }
+    }
+    ImGui::PopStyleColor(2);
+
+    ImGui::PushItemWidth(120);
+    if (ap.vs_mode) {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 80, 0, 255));
+        ImGui::DragFloat("##vs_target", &ap.target_vs_fpm, 100.0f, -6000.0f, 6000.0f, "%+.0f fpm");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(40, 40, 40, 255));
+        ImGui::BeginDisabled();
+        ImGui::DragFloat("##vs_target", &ap.target_vs_fpm, 100.0f, -6000.0f, 6000.0f, "%+.0f fpm");
+        ImGui::EndDisabled();
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopItemWidth();
+
+    ImGui::TextColored(ImColor(IM_COL32(150, 150, 150, 255)), "CUR: %+.0f fpm", sensors.vs_fpm);
+
+    ImGui::EndChild();
+    ImGui::NextColumn();
+
+    ImGui::Columns(1);
+
+    // AP Disconnect Button (center bottom, like real Airbus)
+    ImGui::Spacing();
+    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 180) * 0.5f);
+    ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(200, 0, 0, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 50, 50, 255));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(150, 0, 0, 255));
+    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
+    if (ImGui::Button("AP DISCONNECT", ImVec2(180, 35))) {
+        // Disconnect all autopilot modes (triggers master warning)
+        ap.spd_mode = false;
+        ap.hdg_mode = false;
+        ap.alt_mode = false;
+        ap.vs_mode = false;
+    }
+    ImGui::PopStyleColor(4);
 
     ImGui::End();
     ImGui::PopStyleColor();

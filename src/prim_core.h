@@ -15,8 +15,8 @@ public:
     const FlightControlStatus& fctl_status() const { return fctl_status_; }
     const EngineData& engine_data() const { return engine_data_; }
 
-    void update(const PilotInput& pilot, const Sensors& s, const Faults& f, float dt_sec, AlertManager& am);
-    void updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPosition flaps, float dt_sec);
+    void update(const PilotInput& pilot, const Sensors& s, const Faults& f, float dt_sec, AlertManager& am, AutopilotState& ap);
+    void updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPosition flaps, float dt_sec, const AutopilotState& ap);
 
 private:
     Surfaces surfaces_{};

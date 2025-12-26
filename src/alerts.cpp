@@ -5,17 +5,22 @@
 #include "alerts.h"
 
 AlertEdge AlertManager::set(int id, AlertLevel level, const std::string& text, bool condition_active, bool latch_when_active) {
+    return set(id, level, text, condition_active, latch_when_active, {});
+}
+
+AlertEdge AlertManager::set(int id, AlertLevel level, const std::string& text, bool condition_active, bool latch_when_active, const std::vector<std::string>& ecam_actions) {
     Alert* a = nullptr;
     for (auto& it : alerts_) {
         if (it.id == id) { a = &it; break; }
     }
     if (!a) {
-        alerts_.push_back(Alert{ id, level, text, false, false, false });
+        alerts_.push_back(Alert{ id, level, text, false, false, false, {} });
         a = &alerts_.back();
     }
 
     a->level = level;
     a->text  = text;
+    a->ecam_actions = ecam_actions;
 
     AlertEdge edge{};
     bool prevShown = (a->active || a->latched);

@@ -15,6 +15,7 @@ struct Alert {
     bool active = false;
     bool latched = false;
     bool acknowledged = false;
+    std::vector<std::string> ecam_actions; // Procedural steps for pilot to follow
 };
 
 struct AlertEdge {
@@ -25,6 +26,7 @@ struct AlertEdge {
 class AlertManager {
 public:
     AlertEdge set(int id, AlertLevel level, const std::string& text, bool condition_active, bool latch_when_active);
+    AlertEdge set(int id, AlertLevel level, const std::string& text, bool condition_active, bool latch_when_active, const std::vector<std::string>& ecam_actions);
 
     void clearLatched(int id);
     void clearAllLatched();

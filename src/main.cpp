@@ -44,6 +44,7 @@ int main(int, char**) {
     PrimCore prim{};
     SimulationSettings sim_settings{};
     FlapsPosition flaps = FlapsPosition::RETRACTED;
+    AutopilotState autopilot{};
 
     uint64_t lastCounter = SDL_GetPerformanceCounter();
     const double freq = (double)SDL_GetPerformanceFrequency();
@@ -60,11 +61,11 @@ int main(int, char**) {
             if (event.type == SDL_QUIT) running = false;
         }
 
-        prim.update(pilot, sensors, faults, dt, alerts);
+        prim.update(pilot, sensors, faults, dt, alerts, autopilot);
 
         // Update flight dynamics unless in manual override mode (for QF72-style scenarios)
         if (!sim_settings.manual_sensor_override) {
-            prim.updateFlightDynamics(sensors, pilot, flaps, dt);
+            prim.updateFlightDynamics(sensors, pilot, flaps, dt, autopilot);
         }
 
         ImGui_ImplSDLRenderer2_NewFrame();
@@ -76,6 +77,7 @@ int main(int, char**) {
         DrawPFDPanel(sensors, prim, pilot);
         DrawFctlPanel(prim, faults);
         DrawControlInputPanel(pilot, sensors, faults, sim_settings, flaps);
+        DrawAutopilotPanel(autopilot, sensors);
 
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 12, 12, 12, 255);

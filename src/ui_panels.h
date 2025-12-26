@@ -12,3 +12,4 @@ void DrawEcamPanel(AlertManager& alerts, Sensors& sensors, PilotInput& pilot, Fa
 void DrawFctlPanel(const PrimCore& prim, Faults& faults);
 void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput& pilot);
 void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, SimulationSettings& sim_settings, FlapsPosition& flaps);
+void DrawAutopilotPanel(AutopilotState& ap, const Sensors& sensors);
