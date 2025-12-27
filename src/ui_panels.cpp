@@ -4,6 +4,7 @@
 // Created on: 24/12/2025.
 #include "ui_panels.h"
 #include "imgui.h"
+#include <SDL2/SDL.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -59,11 +60,11 @@ static void EndAirbusBox() {
 // MASTER WARNING/CAUTION Panel
 // ================================
 void DrawMasterPanel(AlertManager& alerts) {
-    ImGui::SetNextWindowPos(ImVec2(20, 20), ImGuiCond_Once);
-    ImGui::SetNextWindowSize(ImVec2(420, 100), ImGuiCond_Once);
+    ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(350, 90), ImGuiCond_Once);
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
-    ImGui::Begin("MASTER WARNING/CAUTION", nullptr, ImGuiWindowFlags_NoResize);
+    ImGui::Begin("MASTER WARNING/CAUTION", nullptr);
 
     bool mw = alerts.masterWarningOn();
     bool mc = alerts.masterCautionOn();
@@ -103,11 +104,11 @@ void DrawMasterPanel(AlertManager& alerts) {
 // ECAM E/WD Display
 // ================================
 void DrawEcamPanel(AlertManager& alerts, Sensors& sensors, PilotInput& pilot, Faults& faults, const PrimCore& prim, FlapsPosition flaps) {
-    ImGui::SetNextWindowPos(ImVec2(20, 140), ImGuiCond_Once);
-    ImGui::SetNextWindowSize(ImVec2(420, 560), ImGuiCond_Once);
+    ImGui::SetNextWindowPos(ImVec2(10, 110), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(350, 480), ImGuiCond_Once);
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
-    ImGui::Begin("ECAM E/WD", nullptr, ImGuiWindowFlags_NoResize);
+    ImGui::Begin("ECAM E/WD", nullptr);
 
     // Title
     TextCentered("ENGINE / WARNING DISPLAY", AirbusColors::WHITE);
@@ -400,6 +401,41 @@ static void DrawSpeedTape(ImVec2 pos, ImVec2 size, float speed_knots) {
         }
     }
 
+    // Calculate speed trend (acceleration/deceleration)
+    static float prev_speed = speed_knots;
+    static float trend_filter = 0.0f;
+    float dt = ImGui::GetIO().DeltaTime;
+
+    if (dt > 0.0f) {
+        float speed_change_rate = (speed_knots - prev_speed) / dt;  // knots/sec
+        // Low-pass filter for smoother trend
+        trend_filter = trend_filter * 0.9f + speed_change_rate * 0.1f;
+        prev_speed = speed_knots;
+    }
+
+    // Speed trend arrow (shows predicted speed in 10 seconds)
+    float trend_prediction = trend_filter * 10.0f;  // Speed change in 10 seconds
+    if (std::abs(trend_prediction) > 2.0f) {  // Only show if significant trend
+        float trend_y = center_y - trend_prediction * pixels_per_knot;
+        trend_y = clampf(trend_y, pos.y + 20, pos.y + size.y - 20);
+
+        // Draw trend arrow (triangle)
+        ImVec2 arrow_tip = ImVec2(pos.x + size.x - 5, trend_y);
+        ImVec2 arrow_base_top = ImVec2(pos.x + size.x - 15, trend_y - 8);
+        ImVec2 arrow_base_bot = ImVec2(pos.x + size.x - 15, trend_y + 8);
+
+        ImU32 trend_color = (trend_prediction > 0) ? AirbusColors::MAGENTA : AirbusColors::AMBER;
+        draw_list->AddTriangleFilled(arrow_tip, arrow_base_top, arrow_base_bot, trend_color);
+
+        // Draw trend line from current speed to trend arrow
+        draw_list->AddLine(
+            ImVec2(pos.x + size.x - 5, center_y),
+            ImVec2(pos.x + size.x - 5, trend_y),
+            trend_color,
+            2.0f
+        );
+    }
+
     // Current speed box
     ImVec2 box_pos = ImVec2(pos.x + size.x + 5, center_y - 15);
     ImVec2 box_size = ImVec2(60, 30);
@@ -481,21 +517,55 @@ static void DrawAltitudeTape(ImVec2 pos, ImVec2 size, float altitude_ft, float v
 // ================================
 // Primary Flight Display Elements
 // ================================
-void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput& pilot) {
-    ImGui::SetNextWindowPos(ImVec2(460, 20), ImGuiCond_Once);
-    ImGui::SetNextWindowSize(ImVec2(500, 500), ImGuiCond_Once);
+void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput& pilot, const AutopilotState& ap) {
+    ImGui::SetNextWindowPos(ImVec2(370, 10), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(420, 420), ImGuiCond_Once);
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
-    ImGui::Begin("PRIMARY FLIGHT DISPLAY", nullptr, ImGuiWindowFlags_NoResize);
+    ImGui::Begin("PRIMARY FLIGHT DISPLAY", nullptr);
 
     const auto& fctl = prim.fctl_status();
+    const auto& gpws = prim.gpws_callouts();
 
-    // FMA (Flight Mode Annunciator) - top line
+    // FMA (Flight Mode Annunciator) - top line with automation status
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 255));
-    ImGui::BeginChild("FMA", ImVec2(0, 35), true);
+    ImGui::BeginChild("FMA", ImVec2(0, 55), true);
 
-    const char* law_text = (fctl.law == ControlLaw::NORMAL) ? "NORMAL LAW" :
-                           (fctl.law == ControlLaw::ALTERNATE) ? "ALT LAW" : "DIRECT LAW";
+    // First row: Thrust / Vertical / Lateral modes (like real A320 FMA)
+    ImGui::SetCursorPosY(5);
+
+    // Column 1: Thrust mode
+    ImGui::SetCursorPosX(10);
+    if (ap.autothrust && ap.spd_mode) {
+        ImGui::TextColored(ImColor(AirbusColors::GREEN), "SPD");
+    } else if (ap.autothrust) {
+        ImGui::TextColored(ImColor(AirbusColors::GREEN), "A/THR");
+    } else {
+        ImGui::TextColored(ImColor(AirbusColors::WHITE), "MAN THR");
+    }
+
+    // Column 2: Vertical mode
+    ImGui::SameLine(140);
+    if (ap.alt_mode) {
+        ImGui::TextColored(ImColor(AirbusColors::GREEN), "ALT");
+    } else if (ap.vs_mode) {
+        ImGui::TextColored(ImColor(AirbusColors::GREEN), "V/S");
+    } else {
+        ImGui::TextColored(ImColor(IM_COL32(100,100,100,255)), "---");
+    }
+
+    // Column 3: Lateral mode
+    ImGui::SameLine(240);
+    if (ap.hdg_mode) {
+        ImGui::TextColored(ImColor(AirbusColors::GREEN), "HDG");
+    } else {
+        ImGui::TextColored(ImColor(IM_COL32(100,100,100,255)), "---");
+    }
+
+    // Second row: Control law and protections
+    ImGui::SetCursorPosY(28);
+    const char* law_text = (fctl.law == ControlLaw::NORMAL) ? "NORMAL" :
+                           (fctl.law == ControlLaw::ALTERNATE) ? "ALT LAW" : "DIRECT";
     ImU32 law_color = (fctl.law == ControlLaw::NORMAL) ? AirbusColors::GREEN : AirbusColors::AMBER;
 
     ImGui::PushStyleColor(ImGuiCol_Text, law_color);
@@ -503,7 +573,7 @@ void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput
     ImGui::Text("%s", law_text);
     ImGui::PopStyleColor();
 
-    ImGui::SameLine(ImGui::GetWindowWidth() - 100);
+    ImGui::SameLine(240);
     if (fctl.alpha_prot) {
         ImGui::TextColored(ImColor(AirbusColors::AMBER), "A.PROT");
     } else if (fctl.alpha_floor) {
@@ -554,6 +624,58 @@ void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput
     snprintf(mach_text, sizeof(mach_text), "M %.3f", sensors.mach);
     draw_list->AddText(mach_pos, AirbusColors::CYAN, mach_text);
 
+    // GPWS Callouts (center of display, very prominent)
+    if (!gpws.current_callout.empty()) {
+        ImVec2 callout_pos = ImVec2(canvas_pos.x + canvas_size.x * 0.5f, canvas_pos.y + canvas_size.y * 0.35f);
+
+        // Determine color based on callout type
+        ImU32 callout_color = AirbusColors::GREEN;
+        float font_scale = 1.5f;
+
+        if (gpws.current_callout == "PULL UP") {
+            callout_color = AirbusColors::RED;
+            font_scale = 2.5f;
+            // Flashing effect
+            static float blink_timer = 0.0f;
+            blink_timer += ImGui::GetIO().DeltaTime;
+            if (fmod(blink_timer, 0.5f) < 0.25f) {
+                callout_color = IM_COL32(0, 0, 0, 0);  // Flash off
+            }
+        } else if (gpws.current_callout == "WINDSHEAR") {
+            callout_color = AirbusColors::RED;
+            font_scale = 2.0f;
+        } else if (gpws.current_callout == "RETARD") {
+            callout_color = AirbusColors::AMBER;
+            font_scale = 2.0f;
+        } else {
+            // Altitude callouts
+            callout_color = AirbusColors::GREEN;
+            font_scale = 1.8f;
+        }
+
+        // Draw callout with larger font
+        ImFont* font = ImGui::GetFont();
+        float prev_scale = font->Scale;
+        font->Scale = font_scale;
+        ImGui::PushFont(font);
+
+        ImVec2 text_size = ImGui::CalcTextSize(gpws.current_callout.c_str());
+        ImVec2 text_pos = ImVec2(callout_pos.x - text_size.x * 0.5f, callout_pos.y - text_size.y * 0.5f);
+
+        // Draw background box for better visibility
+        ImVec2 box_padding = ImVec2(15, 10);
+        draw_list->AddRectFilled(
+            ImVec2(text_pos.x - box_padding.x, text_pos.y - box_padding.y),
+            ImVec2(text_pos.x + text_size.x + box_padding.x, text_pos.y + text_size.y + box_padding.y),
+            IM_COL32(0, 0, 0, 200)
+        );
+
+        draw_list->AddText(text_pos, callout_color, gpws.current_callout.c_str());
+
+        font->Scale = prev_scale;
+        ImGui::PopFont();
+    }
+
     ImGui::Spacing();
 
     // Thrust display at bottom
@@ -601,11 +723,11 @@ void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput
 // F/CTL - Flight Control System Display
 // ================================
 void DrawFctlPanel(const PrimCore& prim, Faults& faults) {
-    ImGui::SetNextWindowPos(ImVec2(460, 540), ImGuiCond_Once);
-    ImGui::SetNextWindowSize(ImVec2(500, 170), ImGuiCond_Once);
+    ImGui::SetNextWindowPos(ImVec2(370, 440), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(420, 150), ImGuiCond_Once);
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
-    ImGui::Begin("F/CTL STATUS", nullptr, ImGuiWindowFlags_NoResize);
+    ImGui::Begin("F/CTL STATUS", nullptr);
 
     const auto& fctl = prim.fctl_status();
 
@@ -662,11 +784,11 @@ void DrawFctlPanel(const PrimCore& prim, Faults& faults) {
 // Control Input Panel
 // ================================
 void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, SimulationSettings& sim_settings, FlapsPosition& flaps) {
-    ImGui::SetNextWindowPos(ImVec2(980, 20), ImGuiCond_Once);
-    ImGui::SetNextWindowSize(ImVec2(300, 690), ImGuiCond_Once);
+    ImGui::SetNextWindowPos(ImVec2(800, 10), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(280, 580), ImGuiCond_Once);
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
-    ImGui::Begin("SIMULATOR CONTROLS", nullptr, ImGuiWindowFlags_NoResize);
+    ImGui::Begin("SIMULATOR CONTROLS", nullptr);
 
     TextCentered("FLIGHT SIMULATOR INPUTS", AirbusColors::AMBER);
     ImGui::Separator();
@@ -815,11 +937,11 @@ void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, 
 // Autopilot Control Panel (FCU-style)
 // ================================
 void DrawAutopilotPanel(AutopilotState& ap, const Sensors& sensors) {
-    ImGui::SetNextWindowPos(ImVec2(460, 730), ImGuiCond_Once);
-    ImGui::SetNextWindowSize(ImVec2(820, 160), ImGuiCond_Once);
+    ImGui::SetNextWindowPos(ImVec2(10, 600), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(780, 150), ImGuiCond_Once);
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
-    ImGui::Begin("AUTOPILOT / FCU", nullptr, ImGuiWindowFlags_NoResize);
+    ImGui::Begin("AUTOPILOT / FCU", nullptr);
 
     TextCentered("FLIGHT CONTROL UNIT", AirbusColors::CYAN);
     ImGui::Separator();
@@ -977,9 +1099,25 @@ void DrawAutopilotPanel(AutopilotState& ap, const Sensors& sensors) {
 
     ImGui::Columns(1);
 
-    // AP Disconnect Button (center bottom, like real Airbus)
+    // Autothrust toggle (like real Airbus)
     ImGui::Spacing();
-    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 180) * 0.5f);
+    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 200) * 0.5f);
+
+    ImU32 athr_color = ap.autothrust ? AirbusColors::GREEN : IM_COL32(60, 60, 60, 255);
+    ImGui::PushStyleColor(ImGuiCol_Button, athr_color);
+    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
+    if (ImGui::Button("A/THR", ImVec2(80, 30))) {
+        ap.autothrust = !ap.autothrust;
+        if (ap.autothrust) {
+            // When autothrust is enabled, sync SPD mode to current speed
+            ap.spd_mode = true;
+            ap.target_spd_knots = sensors.ias_knots;
+        }
+    }
+    ImGui::PopStyleColor(2);
+
+    // AP Disconnect Button (center bottom, like real Airbus)
+    ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(200, 0, 0, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 50, 50, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(150, 0, 0, 255));
@@ -990,8 +1128,138 @@ void DrawAutopilotPanel(AutopilotState& ap, const Sensors& sensors) {
         ap.hdg_mode = false;
         ap.alt_mode = false;
         ap.vs_mode = false;
+        ap.autothrust = false;
     }
     ImGui::PopStyleColor(4);
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+}
+void DrawSystemsPanel(TrimSystem& trim, Speedbrakes& speedbrakes, LandingGear& gear, FlightPhase phase,
+                      HydraulicSystem& hydraulics, EngineState& engines, Weather& weather, Faults& faults) {
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(20, 20, 20, 255));
+    ImGui::SetNextWindowSize(ImVec2(350, 580), ImGuiCond_Once);
+    ImGui::SetNextWindowPos(ImVec2(1090, 10), ImGuiCond_Once);
+    ImGui::Begin("AIRCRAFT SYSTEMS", nullptr);
+
+    // Flight Phase Display
+    ImGui::Text("FLIGHT PHASE:");
+    ImGui::SameLine();
+    const char* phase_names[] = {"PREFLIGHT", "TAXI", "TAKEOFF", "CLIMB", "CRUISE", "DESCENT", "APPROACH", "LANDING", "ROLLOUT"};
+    ImGui::TextColored(ImColor(AirbusColors::GREEN), "%s", phase_names[(int)phase]);
+
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // TRIM SYSTEM
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "PITCH TRIM");
+    ImGui::PushItemWidth(150);
+    ImGui::SliderFloat("##trim", &trim.pitch_trim_deg, -13.5f, 4.0f, "%.1f deg");
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    ImGui::Checkbox("Auto Trim", &trim.auto_trim);
+
+    ImGui::Spacing();
+
+    // SPEEDBRAKES
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "SPEEDBRAKES");
+    ImGui::PushItemWidth(150);
+    ImGui::SliderFloat("##speedbrake", &speedbrakes.position, 0.0f, 1.0f, "%.0f%%", ImGuiSliderFlags_AlwaysClamp);
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    ImGui::Checkbox("Armed", &speedbrakes.armed);
+
+    ImGui::Spacing();
+
+    // LANDING GEAR
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "LANDING GEAR");
+    const char* gear_pos_names[] = {"UP", "DOWN", "TRANSIT"};
+    ImU32 gear_color = (gear.position == GearPosition::DOWN) ? AirbusColors::GREEN :
+                       (gear.position == GearPosition::UP) ? AirbusColors::AMBER :
+                       AirbusColors::RED;
+    ImGui::TextColored(ImColor(gear_color), "Position: %s", gear_pos_names[(int)gear.position]);
+
+    if (ImGui::Button("GEAR DOWN", ImVec2(100, 25))) {
+        if (gear.position == GearPosition::UP) {
+            gear.position = GearPosition::TRANSIT;
+            gear.transit_timer = 0.0f;
+        } else if (gear.position == GearPosition::TRANSIT) {
+            gear.position = GearPosition::DOWN;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("GEAR UP", ImVec2(100, 25))) {
+        if (gear.position == GearPosition::DOWN && !gear.weight_on_wheels) {
+            gear.position = GearPosition::TRANSIT;
+            gear.transit_timer = 0.0f;
+        } else if (gear.position == GearPosition::TRANSIT) {
+            gear.position = GearPosition::UP;
+        }
+    }
+    ImGui::Text("Weight on Wheels: %s", gear.weight_on_wheels ? "YES" : "NO");
+
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // HYDRAULIC SYSTEMS
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "HYDRAULICS");
+    ImGui::TextColored(ImColor(hydraulics.green_avail ? AirbusColors::GREEN : AirbusColors::AMBER), 
+                       "GREEN:  %s", hydraulics.green_avail ? "AVAIL" : "FAULT");
+    ImGui::TextColored(ImColor(hydraulics.blue_avail ? AirbusColors::GREEN : AirbusColors::AMBER), 
+                       "BLUE:   %s", hydraulics.blue_avail ? "AVAIL" : "FAULT");
+    ImGui::TextColored(ImColor(hydraulics.yellow_avail ? AirbusColors::GREEN : AirbusColors::AMBER), 
+                       "YELLOW: %s", hydraulics.yellow_avail ? "AVAIL" : "FAULT");
+
+    ImGui::Spacing();
+
+    // ENGINE STATUS
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "ENGINES");
+    ImGui::Columns(2, "engine_cols", false);
+
+    ImU32 eng1_color = engines.engine1_fire ? AirbusColors::RED :
+                       engines.engine1_running ? AirbusColors::GREEN : AirbusColors::AMBER;
+    ImGui::TextColored(ImColor(eng1_color), "ENG 1: %s", 
+                       engines.engine1_fire ? "FIRE" :
+                       engines.engine1_running ? "RUN" : "OFF");
+    if (ImGui::Button("START##1", ImVec2(60, 20))) engines.engine1_running = true;
+    ImGui::SameLine();
+    if (ImGui::Button("STOP##1", ImVec2(60, 20))) engines.engine1_running = false;
+    ImGui::Checkbox("FIRE##1", &engines.engine1_fire);
+
+    ImGui::NextColumn();
+
+    ImU32 eng2_color = engines.engine2_fire ? AirbusColors::RED :
+                       engines.engine2_running ? AirbusColors::GREEN : AirbusColors::AMBER;
+    ImGui::TextColored(ImColor(eng2_color), "ENG 2: %s", 
+                       engines.engine2_fire ? "FIRE" :
+                       engines.engine2_running ? "RUN" : "OFF");
+    if (ImGui::Button("START##2", ImVec2(60, 20))) engines.engine2_running = true;
+    ImGui::SameLine();
+    if (ImGui::Button("STOP##2", ImVec2(60, 20))) engines.engine2_running = false;
+    ImGui::Checkbox("FIRE##2", &engines.engine2_fire);
+
+    ImGui::Columns(1);
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // WEATHER
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "WEATHER");
+    ImGui::PushItemWidth(200);
+    ImGui::SliderFloat("Wind Speed", &weather.wind_speed_knots, 0.0f, 100.0f, "%.0f kt");
+    ImGui::SliderFloat("Wind Direction", &weather.wind_direction_deg, 0.0f, 359.0f, "%.0f deg");
+    ImGui::SliderFloat("Turbulence", &weather.turbulence_intensity, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Windshear", &weather.windshear_intensity, 0.0f, 1.0f, "%.2f");
+    ImGui::PopItemWidth();
+
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // FAULT INJECTION
+    ImGui::TextColored(ImColor(AirbusColors::RED), "FAULT INJECTION");
+    ImGui::Checkbox("Trim Runaway", &faults.trim_runaway);
+    ImGui::Checkbox("Green Hyd Fail", &faults.green_hyd_fail);
+    ImGui::Checkbox("Blue Hyd Fail", &faults.blue_hyd_fail);
+    ImGui::Checkbox("Yellow Hyd Fail", &faults.yellow_hyd_fail);
 
     ImGui::End();
     ImGui::PopStyleColor();

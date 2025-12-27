@@ -4,17 +4,27 @@
 // Created on: 24/12/2025.
 
 #include "prim_core.h"
+#include <SDL2/SDL.h>
 #include <algorithm>
 #include <cmath>
 
 static float clampf(float v, float lo, float hi) { return std::max(lo, std::min(hi, v)); }
 static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 
-void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f, float dt_sec, AlertManager& am, AutopilotState& ap) {
+void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f, float dt_sec, AlertManager& am, AutopilotState& ap,
+                      TrimSystem& trim, const LandingGear& gear, HydraulicSystem& hydraulics, const EngineState& engines) {
+    // ========== Hydraulic Systems ==========
+    hydraulics.green_avail = !f.green_hyd_fail;
+    hydraulics.blue_avail = !f.blue_hyd_fail;
+    hydraulics.yellow_avail = !f.yellow_hyd_fail;
+
     // ========== Update Flight Control Status ==========
-    fctl_status_.elac1_avail = !f.elac1_fail;
-    fctl_status_.elac2_avail = !f.elac2_fail;
-    fctl_status_.sec1_avail = !f.sec1_fail;
+    // Need at least one hydraulic system for flight controls
+    bool hydraulics_ok = hydraulics.green_avail || hydraulics.blue_avail || hydraulics.yellow_avail;
+
+    fctl_status_.elac1_avail = !f.elac1_fail && hydraulics_ok;
+    fctl_status_.elac2_avail = !f.elac2_fail && hydraulics_ok;
+    fctl_status_.sec1_avail = !f.sec1_fail && hydraulics_ok;
 
     // Determine control law based on failures
     // NORMAL LAW: All ELACs and SECs operational
@@ -83,6 +93,50 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     am.set(410, AlertLevel::MEMO, "ALTN LAW", alt_law, false);
     am.set(411, AlertLevel::WARNING, "DIRECT LAW", direct_law, false);
 
+    // Hydraulic system alerts
+    am.set(420, AlertLevel::CAUTION, "GREEN HYD FAULT", f.green_hyd_fail, true, {
+        "* GREEN HYD ......... OFF",
+        "* LAND ASAP"
+    });
+    am.set(421, AlertLevel::CAUTION, "BLUE HYD FAULT", f.blue_hyd_fail, true, {
+        "* BLUE HYD .......... OFF",
+        "* LAND ASAP"
+    });
+    am.set(422, AlertLevel::CAUTION, "YELLOW HYD FAULT", f.yellow_hyd_fail, true, {
+        "* YELLOW HYD ........ OFF",
+        "* LAND ASAP"
+    });
+
+    // Engine failure alerts
+    bool eng1_fail = !engines.engine1_running;
+    bool eng2_fail = !engines.engine2_running;
+    bool dual_engine_fail = eng1_fail && eng2_fail;
+
+    am.set(430, AlertLevel::WARNING, "ENG 1 FAIL", eng1_fail && !dual_engine_fail, true, {
+        "* ENG 1 ............. OFF",
+        "* LAND ASAP",
+        "* USE SINGLE ENGINE PROCEDURES"
+    });
+    am.set(431, AlertLevel::WARNING, "ENG 2 FAIL", eng2_fail && !dual_engine_fail, true, {
+        "* ENG 2 ............. OFF",
+        "* LAND ASAP",
+        "* USE SINGLE ENGINE PROCEDURES"
+    });
+    am.set(432, AlertLevel::WARNING, "DUAL ENG FAIL", dual_engine_fail, true, {
+        "* ENG 1 ............. OFF",
+        "* ENG 2 ............. OFF",
+        "* RAM AIR TURBINE ... DEPLOY",
+        "* EMERGENCY DESCENT"
+    });
+    am.set(433, AlertLevel::WARNING, "ENG 1 FIRE", engines.engine1_fire, true, {
+        "* ENG 1 FIRE HANDLE . PULL",
+        "* ENG 1 AGENT ....... DISCH"
+    });
+    am.set(434, AlertLevel::WARNING, "ENG 2 FIRE", engines.engine2_fire, true, {
+        "* ENG 2 FIRE HANDLE . PULL",
+        "* ENG 2 AGENT ....... DISCH"
+    });
+
     am.set(500, AlertLevel::WARNING, "ELEV JAM", f.elevator_jam, true, {
         "* AP ............... OFF",
         "* USE MANUAL PITCH TRIM",
@@ -95,6 +149,20 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     });
 
     am.set(600, AlertLevel::CAUTION, "ALPHA FLOOR INOP", f.alpha_floor_fail, true);
+
+    // Trim runaway alert (QF72 scenario)
+    am.set(610, AlertLevel::WARNING, "PITCH TRIM RUNAWAY", f.trim_runaway, true, {
+        "* PITCH TRIM ........ OFF",
+        "* USE MAN PITCH TRIM",
+        "* STAB JAM PROC ..... APPLY"
+    });
+
+    // Landing gear warnings
+    bool gear_disagree = (gear.position == GearPosition::TRANSIT);
+    bool gear_not_down_low_alt = (!gear.weight_on_wheels) && (gear.position != GearPosition::DOWN) && (s.altitude_ft < 2000.0f);
+
+    am.set(620, AlertLevel::CAUTION, "L/G DISAGREE", gear_disagree, false);
+    am.set(621, AlertLevel::WARNING, "L/G NOT DOWN", gear_not_down_low_alt, false);
 
     // Protection messages
     am.set(700, AlertLevel::MEMO, "ALPHA PROT", fctl_status_.alpha_prot, false);
@@ -136,6 +204,33 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     float effective_pitch = pilot.pitch;
     float effective_roll = pilot.roll;
 
+    // ========== Trim System ==========
+    // Trim runaway condition
+    if (f.trim_runaway) {
+        // Trim runs away at 0.5 deg/sec
+        trim.pitch_trim_deg += 0.5f * dt_sec;
+        trim.pitch_trim_deg = clampf(trim.pitch_trim_deg, -13.5f, 4.0f);
+        trim.auto_trim = false;  // Disable auto trim
+    } else if (trim.auto_trim && (ap.alt_mode || ap.vs_mode)) {
+        // Auto-trim to relieve control forces when autopilot is active
+        float trim_target = -effective_pitch * 2.0f;
+        float trim_rate = 0.3f;  // deg/sec
+        float trim_alpha = 1.0f - std::exp(-trim_rate * dt_sec);
+        trim.pitch_trim_deg = lerpf(trim.pitch_trim_deg, trim_target, trim_alpha);
+        trim.pitch_trim_deg = clampf(trim.pitch_trim_deg, -13.5f, 4.0f);
+    }
+
+    // ========== Bank Angle Protection (Normal Law Only) ==========
+    if (fctl_status_.law == ControlLaw::NORMAL && !gear.weight_on_wheels) {
+        float max_bank = 67.0f;  // Maximum bank angle in normal law
+
+        if (std::abs(s.roll_deg) > max_bank) {
+            // Auto-level when exceeding bank limit
+            float bank_error = (s.roll_deg > 0.0f) ? (max_bank - s.roll_deg) : (-max_bank - s.roll_deg);
+            effective_roll = clampf(bank_error * 0.05f, -1.0f, 1.0f);
+        }
+    }
+
     // HEADING MODE: Adjust roll to maintain target heading
     if (ap.hdg_mode) {
         // Calculate shortest heading error (handles 359->0 wraparound)
@@ -154,18 +249,22 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
         float alt_error = ap.target_alt_ft - s.altitude_ft;
         float target_vs = clampf(alt_error * 2.0f, -2000.0f, 2000.0f); // Proportional controller
         float vs_error = target_vs - s.vs_fpm;
-        effective_pitch = clampf(vs_error * 0.0002f, -1.0f, 1.0f);
+        effective_pitch = clampf(vs_error * 0.0004f, -1.0f, 1.0f);
     }
     // VERTICAL SPEED MODE: Adjust pitch to achieve target VS (only if ALT mode is off)
     else if (ap.vs_mode) {
         float vs_error = ap.target_vs_fpm - s.vs_fpm;
-        effective_pitch = clampf(vs_error * 0.0003f, -1.0f, 1.0f);
+        // Increased gain for more responsive VS control
+        effective_pitch = clampf(vs_error * 0.0008f, -1.0f, 1.0f);
     }
 
     // Alpha floor adds nose-up pitch (auto pitch up when alpha floor active)
     float alpha_floor_pitch = fctl_status_.alpha_floor ? 0.3f : 0.0f;
 
-    elevator_cmd_deg_ = (effective_pitch + alpha_floor_pitch) * elevator_max_deg * elevator_authority;
+    // Apply trim to elevator command (trim affects pitch)
+    float trim_effect = trim.pitch_trim_deg / elevator_max_deg;  // Normalize trim to -1..+1 range
+
+    elevator_cmd_deg_ = (effective_pitch + alpha_floor_pitch + trim_effect) * elevator_max_deg * elevator_authority;
     aileron_cmd_deg_ = effective_roll * aileron_max_deg * aileron_authority;
 
     // Apply jams
@@ -183,18 +282,59 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     surfaces_.aileron_deg = clampf(surfaces_.aileron_deg, -aileron_max_deg, aileron_max_deg);
 }
 
-void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPosition flaps, float dt_sec, const AutopilotState& ap) {
+void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPosition flaps, float dt_sec, const AutopilotState& ap,
+                                    const Speedbrakes& speedbrakes, LandingGear& gear, const Weather& weather, const EngineState& engines,
+                                    const TrimSystem& trim) {
     // Improved flight dynamics model - more realistic and less aggressive
 
+    // ========== Landing Gear Animation ==========
+    if (gear.position == GearPosition::TRANSIT) {
+        gear.transit_timer += dt_sec;
+        if (gear.transit_timer >= 10.0f) {  // 10 seconds to extend/retract
+            gear.transit_timer = 0.0f;
+            // Determine final position based on whether we're extending or retracting
+            // This would be controlled by pilot input, for now just complete the transit
+        }
+    }
+
+    // Update weight on wheels based on ground contact
+    gear.weight_on_wheels = (s.altitude_ft <= 0.0f) && (s.ias_knots < 80.0f);
+
     // ========== Autopilot Speed Control ==========
+    // When autothrust is active, it controls thrust automatically and overrides manual levers
     float effective_thrust = pilot.thrust;
 
-    // SPEED MODE: Adjust thrust to reach target speed
-    if (ap.spd_mode) {
+    // AUTOTHRUST MODE: Automatically control thrust to reach target speed
+    if (ap.autothrust && ap.spd_mode) {
+        // P+I controller for better speed tracking
+        static float thrust_integrator = 0.0f;
+
         float speed_error = ap.target_spd_knots - s.ias_knots;
-        float thrust_adjustment = speed_error * 0.003f; // P-controller gain
-        effective_thrust = clampf(pilot.thrust + thrust_adjustment, 0.0f, 1.0f);
+
+        // Proportional gain
+        float thrust_p = speed_error * 0.006f;
+
+        // Integral gain (accumulate error)
+        thrust_integrator += speed_error * dt_sec * 0.001f;
+        thrust_integrator = clampf(thrust_integrator, -0.3f, 0.3f);
+
+        // Calculate thrust command directly (overrides manual levers)
+        effective_thrust = clampf(0.5f + thrust_p + thrust_integrator, 0.0f, 1.0f);
+    } else {
+        // Reset integrator when autothrust is off
+        static float thrust_integrator = 0.0f;
+        thrust_integrator = 0.0f;
     }
+
+    // ========== Engine Failures ==========
+    // Adjust effective thrust based on engine status
+    float engine_thrust_mult = 1.0f;
+    if (!engines.engine1_running && !engines.engine2_running) {
+        engine_thrust_mult = 0.0f;  // No thrust with both engines failed
+    } else if (!engines.engine1_running || !engines.engine2_running) {
+        engine_thrust_mult = 0.5f;  // Half thrust with one engine
+    }
+    effective_thrust *= engine_thrust_mult;
 
     // ========== Flaps Effects ==========
     // Flaps increase lift (allows slower flight) and increase drag
@@ -233,18 +373,55 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
     // ========== Pitch Dynamics ==========
     // Elevator affects pitch rate
     float pitch_rate_dps = surfaces_.elevator_deg * 2.0f; // deg/sec
+
+    // Turbulence affects pitch
+    if (weather.turbulence_intensity > 0.0f) {
+        float pitch_turb = weather.turbulence_intensity * std::cos(SDL_GetPerformanceCounter() * 0.0012f) * 8.0f;
+        pitch_rate_dps += pitch_turb;
+    }
+
+    // Windshear creates sudden pitch changes
+    if (weather.windshear_intensity > 0.0f && s.altitude_ft < 1500.0f) {
+        float windshear_pitch = weather.windshear_intensity * std::sin(SDL_GetPerformanceCounter() * 0.002f) * 15.0f;
+        pitch_rate_dps += windshear_pitch;
+    }
+
     s.pitch_deg += pitch_rate_dps * dt_sec;
     s.pitch_deg = clampf(s.pitch_deg, -30.0f, 30.0f);
 
     // ========== Roll Dynamics ==========
     float roll_rate_dps = surfaces_.aileron_deg * 3.0f; // deg/sec
+
+    // Engine asymmetric thrust creates yaw/roll moments
+    if (!engines.engine1_running && engines.engine2_running) {
+        // Right engine only - creates left yaw and left roll
+        roll_rate_dps -= effective_thrust * 5.0f;
+    } else if (engines.engine1_running && !engines.engine2_running) {
+        // Left engine only - creates right yaw and right roll
+        roll_rate_dps += effective_thrust * 5.0f;
+    }
+
+    // Turbulence affects roll
+    if (weather.turbulence_intensity > 0.0f) {
+        float roll_turb = weather.turbulence_intensity * std::sin(SDL_GetPerformanceCounter() * 0.0015f) * 10.0f;
+        roll_rate_dps += roll_turb;
+    }
+
     s.roll_deg += roll_rate_dps * dt_sec;
-    s.roll_deg = clampf(s.roll_deg, -60.0f, 60.0f);
+    s.roll_deg = clampf(s.roll_deg, -90.0f, 90.0f);
 
     // ========== Heading Dynamics ==========
     // Turn rate depends on roll angle (coordinated turn)
     // At 30 degrees bank, standard rate turn is ~3 deg/sec
     float turn_rate_dps = std::sin(s.roll_deg * 3.14159f / 180.0f) * 6.0f; // deg/sec
+
+    // Engine asymmetric thrust also creates yaw
+    if (!engines.engine1_running && engines.engine2_running) {
+        turn_rate_dps -= effective_thrust * 3.0f;  // Left yaw
+    } else if (engines.engine1_running && !engines.engine2_running) {
+        turn_rate_dps += effective_thrust * 3.0f;  // Right yaw
+    }
+
     s.heading_deg += turn_rate_dps * dt_sec;
 
     // Wrap heading to 0-359 range
@@ -259,17 +436,33 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
     s.altitude_ft = clampf(s.altitude_ft, 0.0f, 45000.0f);
 
     // ========== IMPROVED Speed & Thrust Dynamics ==========
-    // Much stronger thrust, less aggressive drag
+    // Balanced thrust and drag for realistic flight
 
-    // Thrust force (significantly increased from before)
-    float thrust_force = effective_thrust * 60.0f; // kt/sec max acceleration
+    // Thrust force - rebalanced for realistic acceleration
+    float thrust_force = effective_thrust * 6.0f; // kt/sec max acceleration
 
-    // Base drag (much reduced)
+    // Base drag - increased for better balance
     float speed_ratio = s.ias_knots / 280.0f;
-    float base_drag = speed_ratio * speed_ratio * 3.0f; // Reduced from 8.0
+    float base_drag = speed_ratio * speed_ratio * 4.5f; // Increased for equilibrium at ~0.5 thrust
 
     // Flaps increase drag
     float total_drag = base_drag * flaps_drag_mult;
+
+    // ========== Speedbrake Drag ==========
+    // Speedbrakes add significant drag (deployed in flight or on ground)
+    float speedbrake_drag = speedbrakes.position * 3.0f * (s.ias_knots / 200.0f);
+    total_drag += speedbrake_drag;
+
+    // ========== Landing Gear Drag ==========
+    // Extended gear adds significant drag
+    if (gear.position == GearPosition::DOWN) {
+        float gear_drag = 2.5f * (s.ias_knots / 200.0f);
+        total_drag += gear_drag;
+    } else if (gear.position == GearPosition::TRANSIT) {
+        // Half drag during transit
+        float gear_drag = 1.25f * (s.ias_knots / 200.0f);
+        total_drag += gear_drag;
+    }
 
     // Induced drag from pitch (MUCH less aggressive)
     // Only significant at high AoA
@@ -283,11 +476,24 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
     // Climbing costs energy, descending gains it
     float gravity_effect = -s.pitch_deg * 0.12f; // Reduced from 0.2
 
+    // ========== Weather Effects ==========
+    // Headwind/tailwind component
+    float wind_heading_diff = weather.wind_direction_deg - s.heading_deg;
+    float headwind_component = weather.wind_speed_knots * std::cos(wind_heading_diff * 3.14159f / 180.0f);
+    float wind_effect = headwind_component * 0.015f;  // Headwind slows, tailwind speeds
+
+    // Turbulence adds random disturbances
+    float turbulence_effect = 0.0f;
+    if (weather.turbulence_intensity > 0.0f) {
+        // Random turbulence (simplified - would use actual random in production)
+        turbulence_effect = weather.turbulence_intensity * std::sin(SDL_GetPerformanceCounter() * 0.001f) * 2.0f;
+    }
+
     // Net acceleration
-    float speed_change_rate = thrust_force - total_drag - induced_drag + gravity_effect;
+    float speed_change_rate = thrust_force - total_drag - induced_drag + gravity_effect + wind_effect + turbulence_effect;
 
     s.ias_knots += speed_change_rate * dt_sec;
-    s.ias_knots = clampf(s.ias_knots, 60.0f, 380.0f);
+    s.ias_knots = clampf(s.ias_knots, 0.0f, 380.0f);
 
     // Update Mach (simplified: IAS → Mach conversion, altitude dependent)
     float altitude_factor = 1.0f - (s.altitude_ft / 100000.0f); // Higher alt → higher mach for same IAS
@@ -316,11 +522,24 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
     s.nz = clampf(s.nz, -1.0f, 3.0f);
 
     // ========== Engine Simulation ==========
-    // Update engine parameters based on thrust setting
-    float target_n1 = 20.0f + effective_thrust * 80.0f; // 20% idle to 100% TOGA
-    float target_n2 = 50.0f + effective_thrust * 50.0f; // 50% idle to 100% TOGA
-    float target_egt = 300.0f + effective_thrust * 600.0f; // EGT increases with thrust
-    float target_ff = 300.0f + effective_thrust * 2700.0f; // Fuel flow kg/hr per engine
+    // Update engine parameters based on thrust setting and engine status
+    float target_n1 = 0.0f;
+    float target_n2 = 0.0f;
+    float target_egt = 0.0f;
+    float target_ff = 0.0f;
+
+    // Only update engine parameters if at least one engine is running
+    if (engines.engine1_running || engines.engine2_running) {
+        target_n1 = 20.0f + pilot.thrust * 80.0f; // 20% idle to 100% TOGA
+        target_n2 = 50.0f + pilot.thrust * 50.0f; // 50% idle to 100% TOGA
+        target_egt = 300.0f + pilot.thrust * 600.0f; // EGT increases with thrust
+        target_ff = 300.0f + pilot.thrust * 2700.0f; // Fuel flow kg/hr per engine
+
+        // If one engine failed, the other runs hotter
+        if (!engines.engine1_running || !engines.engine2_running) {
+            target_egt += 50.0f;  // Higher EGT on remaining engine
+        }
+    }
 
     // Smooth engine spool-up/down
     float engine_alpha = 1.0f - std::exp(-1.5f * dt_sec);
@@ -328,4 +547,144 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
     engine_data_.n2_percent = lerpf(engine_data_.n2_percent, target_n2, engine_alpha);
     engine_data_.egt_c = lerpf(engine_data_.egt_c, target_egt, engine_alpha);
     engine_data_.fuel_flow = lerpf(engine_data_.fuel_flow, target_ff, engine_alpha * 0.5f);
+}
+
+FlightPhase PrimCore::detectFlightPhase(const Sensors& s, const LandingGear& gear, const EngineState& engines) const {
+    // Detect current flight phase based on conditions
+    bool on_ground = gear.weight_on_wheels;
+    bool engines_running = engines.engine1_running || engines.engine2_running;
+    bool low_speed = s.ias_knots < 80.0f;
+    bool climbing = s.vs_fpm > 500.0f;
+    bool descending = s.vs_fpm < -500.0f;
+    bool low_altitude = s.altitude_ft < 3000.0f;
+    bool high_altitude = s.altitude_ft > 10000.0f;
+
+    if (on_ground && !engines_running) {
+        return FlightPhase::PREFLIGHT;
+    } else if (on_ground && engines_running && low_speed) {
+        return FlightPhase::TAXI;
+    } else if ((on_ground || (low_altitude && climbing)) && !low_speed) {
+        return FlightPhase::TAKEOFF;
+    } else if (climbing && !low_altitude) {
+        return FlightPhase::CLIMB;
+    } else if (!climbing && !descending && high_altitude) {
+        return FlightPhase::CRUISE;
+    } else if (descending && high_altitude) {
+        return FlightPhase::DESCENT;
+    } else if (descending && low_altitude && !on_ground) {
+        return FlightPhase::APPROACH;
+    } else if (on_ground && !low_speed) {
+        return FlightPhase::ROLLOUT;
+    }
+
+    return FlightPhase::CRUISE;  // Default
+}
+
+void PrimCore::updateGPWS(const Sensors& s, const LandingGear& gear, const Weather& weather, float dt_sec) {
+    // Update callout timer
+    if (gpws_callouts_.callout_timer > 0.0f) {
+        gpws_callouts_.callout_timer -= dt_sec;
+    }
+
+    // Clear callout if timer expired
+    if (gpws_callouts_.callout_timer <= 0.0f) {
+        gpws_callouts_.current_callout = "";
+    }
+
+    // PULL UP warning (terrain warning - already handled in alerts)
+    gpws_callouts_.pull_up_active = (s.altitude_ft < 2500.0f) && (s.vs_fpm < -1500.0f) && !gear.weight_on_wheels;
+
+    // WINDSHEAR warning (based on windshear intensity and low altitude)
+    gpws_callouts_.windshear_active = (weather.windshear_intensity > 0.3f) && (s.altitude_ft < 1500.0f);
+
+    // Set priority callouts
+    if (gpws_callouts_.pull_up_active) {
+        gpws_callouts_.current_callout = "PULL UP";
+        gpws_callouts_.callout_timer = 1.0f;  // Flash for 1 second
+    } else if (gpws_callouts_.windshear_active) {
+        gpws_callouts_.current_callout = "WINDSHEAR";
+        gpws_callouts_.callout_timer = 2.0f;
+    }
+
+    // Altitude callouts (only during approach - descending below 2500ft)
+    bool approaching = (s.vs_fpm < -300.0f) && !gear.weight_on_wheels;
+
+    // Reset callouts when climbing above 3000ft
+    if (s.altitude_ft > 3000.0f && s.vs_fpm > 0.0f) {
+        gpws_callouts_.called_2500 = false;
+        gpws_callouts_.called_1000 = false;
+        gpws_callouts_.called_500 = false;
+        gpws_callouts_.called_400 = false;
+        gpws_callouts_.called_300 = false;
+        gpws_callouts_.called_200 = false;
+        gpws_callouts_.called_100 = false;
+        gpws_callouts_.called_50 = false;
+        gpws_callouts_.called_40 = false;
+        gpws_callouts_.called_30 = false;
+        gpws_callouts_.called_20 = false;
+        gpws_callouts_.called_10 = false;
+        gpws_callouts_.retard_active = false;
+    }
+
+    if (approaching && !gpws_callouts_.pull_up_active && !gpws_callouts_.windshear_active) {
+        // Altitude callouts
+        if (s.altitude_ft <= 2500.0f && s.altitude_ft > 2400.0f && !gpws_callouts_.called_2500) {
+            gpws_callouts_.current_callout = "2500";
+            gpws_callouts_.callout_timer = 1.5f;
+            gpws_callouts_.called_2500 = true;
+        } else if (s.altitude_ft <= 1000.0f && s.altitude_ft > 950.0f && !gpws_callouts_.called_1000) {
+            gpws_callouts_.current_callout = "1000";
+            gpws_callouts_.callout_timer = 1.5f;
+            gpws_callouts_.called_1000 = true;
+        } else if (s.altitude_ft <= 500.0f && s.altitude_ft > 480.0f && !gpws_callouts_.called_500) {
+            gpws_callouts_.current_callout = "500";
+            gpws_callouts_.callout_timer = 1.0f;
+            gpws_callouts_.called_500 = true;
+        } else if (s.altitude_ft <= 400.0f && s.altitude_ft > 380.0f && !gpws_callouts_.called_400) {
+            gpws_callouts_.current_callout = "400";
+            gpws_callouts_.callout_timer = 1.0f;
+            gpws_callouts_.called_400 = true;
+        } else if (s.altitude_ft <= 300.0f && s.altitude_ft > 280.0f && !gpws_callouts_.called_300) {
+            gpws_callouts_.current_callout = "300";
+            gpws_callouts_.callout_timer = 1.0f;
+            gpws_callouts_.called_300 = true;
+        } else if (s.altitude_ft <= 200.0f && s.altitude_ft > 180.0f && !gpws_callouts_.called_200) {
+            gpws_callouts_.current_callout = "200";
+            gpws_callouts_.callout_timer = 1.0f;
+            gpws_callouts_.called_200 = true;
+        } else if (s.altitude_ft <= 100.0f && s.altitude_ft > 90.0f && !gpws_callouts_.called_100) {
+            gpws_callouts_.current_callout = "100";
+            gpws_callouts_.callout_timer = 1.0f;
+            gpws_callouts_.called_100 = true;
+        } else if (s.altitude_ft <= 50.0f && s.altitude_ft > 45.0f && !gpws_callouts_.called_50) {
+            gpws_callouts_.current_callout = "50";
+            gpws_callouts_.callout_timer = 0.8f;
+            gpws_callouts_.called_50 = true;
+        } else if (s.altitude_ft <= 40.0f && s.altitude_ft > 35.0f && !gpws_callouts_.called_40) {
+            gpws_callouts_.current_callout = "40";
+            gpws_callouts_.callout_timer = 0.8f;
+            gpws_callouts_.called_40 = true;
+        } else if (s.altitude_ft <= 30.0f && s.altitude_ft > 25.0f && !gpws_callouts_.called_30) {
+            gpws_callouts_.current_callout = "30";
+            gpws_callouts_.callout_timer = 0.8f;
+            gpws_callouts_.called_30 = true;
+        } else if (s.altitude_ft <= 20.0f && s.altitude_ft > 15.0f && !gpws_callouts_.called_20) {
+            gpws_callouts_.current_callout = "20";
+            gpws_callouts_.callout_timer = 0.8f;
+            gpws_callouts_.called_20 = true;
+            gpws_callouts_.retard_active = true;  // RETARD starts at 20ft
+        } else if (s.altitude_ft <= 10.0f && s.altitude_ft > 5.0f && !gpws_callouts_.called_10) {
+            gpws_callouts_.current_callout = "10";
+            gpws_callouts_.callout_timer = 0.8f;
+            gpws_callouts_.called_10 = true;
+        }
+    }
+
+    // RETARD callout (thrust reduction on landing below 20ft)
+    if (gpws_callouts_.retard_active && s.altitude_ft < 20.0f && s.altitude_ft > 5.0f && !gear.weight_on_wheels) {
+        if (gpws_callouts_.current_callout != "RETARD") {
+            gpws_callouts_.current_callout = "RETARD";
+            gpws_callouts_.callout_timer = 3.0f;  // Keep showing until touchdown
+        }
+    }
 }

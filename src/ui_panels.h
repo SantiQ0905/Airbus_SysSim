@@ -10,6 +10,8 @@
 void DrawMasterPanel(AlertManager& alerts);
 void DrawEcamPanel(AlertManager& alerts, Sensors& sensors, PilotInput& pilot, Faults& faults, const PrimCore& prim, FlapsPosition flaps);
 void DrawFctlPanel(const PrimCore& prim, Faults& faults);
-void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput& pilot);
+void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput& pilot, const AutopilotState& ap);
 void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, SimulationSettings& sim_settings, FlapsPosition& flaps);
 void DrawAutopilotPanel(AutopilotState& ap, const Sensors& sensors);
+void DrawSystemsPanel(TrimSystem& trim, Speedbrakes& speedbrakes, LandingGear& gear, FlightPhase phase,
+                      HydraulicSystem& hydraulics, EngineState& engines, Weather& weather, Faults& faults);

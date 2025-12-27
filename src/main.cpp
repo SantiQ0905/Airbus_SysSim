@@ -45,6 +45,17 @@ int main(int, char**) {
     SimulationSettings sim_settings{};
     FlapsPosition flaps = FlapsPosition::RETRACTED;
     AutopilotState autopilot{};
+    TrimSystem trim{};
+    Speedbrakes speedbrakes{};
+    LandingGear gear{};
+    FlightPhase flight_phase = FlightPhase::PREFLIGHT;
+    HydraulicSystem hydraulics{};
+    EngineState engines{};
+    Weather weather{};
+
+    // Startup scenario selection
+    bool scenario_selected = false;
+    StartupScenario selected_scenario = StartupScenario::CRUISE_10000FT;
 
     uint64_t lastCounter = SDL_GetPerformanceCounter();
     const double freq = (double)SDL_GetPerformanceFrequency();
@@ -61,23 +72,77 @@ int main(int, char**) {
             if (event.type == SDL_QUIT) running = false;
         }
 
-        prim.update(pilot, sensors, faults, dt, alerts, autopilot);
-
-        // Update flight dynamics unless in manual override mode (for QF72-style scenarios)
-        if (!sim_settings.manual_sensor_override) {
-            prim.updateFlightDynamics(sensors, pilot, flaps, dt, autopilot);
-        }
-
         ImGui_ImplSDLRenderer2_NewFrame();
         ImGui_ImplSDL2_NewFrame();
         ImGui::NewFrame();
 
-        DrawMasterPanel(alerts);
-        DrawEcamPanel(alerts, sensors, pilot, faults, prim, flaps);
-        DrawPFDPanel(sensors, prim, pilot);
-        DrawFctlPanel(prim, faults);
-        DrawControlInputPanel(pilot, sensors, faults, sim_settings, flaps);
-        DrawAutopilotPanel(autopilot, sensors);
+        // Show startup scenario selection dialog
+        if (!scenario_selected) {
+            ImGui::OpenPopup("Select Startup Scenario");
+
+            ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+            ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+
+            if (ImGui::BeginPopupModal("Select Startup Scenario", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("Choose initial flight conditions:");
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                if (ImGui::Button("Ground Level - Parked", ImVec2(250, 40))) {
+                    selected_scenario = StartupScenario::GROUND_PARKED;
+                    applyStartupScenario(selected_scenario, sensors, pilot, autopilot, gear, engines);
+                    scenario_selected = true;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::Text("  Aircraft on ground, engines off");
+                ImGui::Spacing();
+                ImGui::Spacing();
+
+                if (ImGui::Button("10,000 ft - Cruise", ImVec2(250, 40))) {
+                    selected_scenario = StartupScenario::CRUISE_10000FT;
+                    applyStartupScenario(selected_scenario, sensors, pilot, autopilot, gear, engines);
+                    scenario_selected = true;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::Text("  In flight at 10,000 ft, 250 knots");
+                ImGui::Spacing();
+                ImGui::Spacing();
+
+                if (ImGui::Button("37,000 ft - High Altitude Cruise", ImVec2(250, 40))) {
+                    selected_scenario = StartupScenario::CRUISE_37000FT;
+                    applyStartupScenario(selected_scenario, sensors, pilot, autopilot, gear, engines);
+                    scenario_selected = true;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::Text("  In flight at 37,000 ft, Mach 0.78");
+
+                ImGui::EndPopup();
+            }
+        }
+
+        // Only run simulation after scenario is selected
+        if (scenario_selected) {
+            // Detect flight phase
+            flight_phase = prim.detectFlightPhase(sensors, gear, engines);
+
+            prim.update(pilot, sensors, faults, dt, alerts, autopilot, trim, gear, hydraulics, engines);
+
+            // Update flight dynamics unless in manual override mode (for QF72-style scenarios)
+            if (!sim_settings.manual_sensor_override) {
+                prim.updateFlightDynamics(sensors, pilot, flaps, dt, autopilot, speedbrakes, gear, weather, engines, trim);
+            }
+
+            // Update GPWS callouts
+            prim.updateGPWS(sensors, gear, weather, dt);
+
+            DrawMasterPanel(alerts);
+            DrawEcamPanel(alerts, sensors, pilot, faults, prim, flaps);
+            DrawPFDPanel(sensors, prim, pilot, autopilot);
+            DrawFctlPanel(prim, faults);
+            DrawControlInputPanel(pilot, sensors, faults, sim_settings, flaps);
+            DrawAutopilotPanel(autopilot, sensors);
+            DrawSystemsPanel(trim, speedbrakes, gear, flight_phase, hydraulics, engines, weather, faults);
+        }
 
         ImGui::Render();
         SDL_SetRenderDrawColor(renderer, 12, 12, 12, 255);
