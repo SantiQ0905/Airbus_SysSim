@@ -17,7 +17,7 @@ public:
     const GPWSCallouts& gpws_callouts() const { return gpws_callouts_; }
 
     void update(const PilotInput& pilot, const Sensors& s, const Faults& f, float dt_sec, AlertManager& am, AutopilotState& ap,
-                TrimSystem& trim, const LandingGear& gear, HydraulicSystem& hydraulics, const EngineState& engines);
+                TrimSystem& trim, const LandingGear& gear, HydraulicSystem& hydraulics, const EngineState& engines, const APUState& apu);
     void updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPosition flaps, float dt_sec, const AutopilotState& ap,
                               const Speedbrakes& speedbrakes, LandingGear& gear, const Weather& weather, const EngineState& engines,
                               const TrimSystem& trim);

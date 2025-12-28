@@ -51,6 +51,7 @@ int main(int, char**) {
     FlightPhase flight_phase = FlightPhase::PREFLIGHT;
     HydraulicSystem hydraulics{};
     EngineState engines{};
+    APUState apu{};
     Weather weather{};
 
     // Startup scenario selection
@@ -125,7 +126,7 @@ int main(int, char**) {
             // Detect flight phase
             flight_phase = prim.detectFlightPhase(sensors, gear, engines);
 
-            prim.update(pilot, sensors, faults, dt, alerts, autopilot, trim, gear, hydraulics, engines);
+            prim.update(pilot, sensors, faults, dt, alerts, autopilot, trim, gear, hydraulics, engines, apu);
 
             // Update flight dynamics unless in manual override mode (for QF72-style scenarios)
             if (!sim_settings.manual_sensor_override) {
@@ -136,12 +137,13 @@ int main(int, char**) {
             prim.updateGPWS(sensors, gear, weather, dt);
 
             DrawMasterPanel(alerts);
-            DrawEcamPanel(alerts, sensors, pilot, faults, prim, flaps);
-            DrawPFDPanel(sensors, prim, pilot, autopilot);
+            DrawEcamPanel(alerts, sensors, pilot, faults, prim, flaps, engines, apu);
+            DrawPFDPanel(sensors, prim, pilot, autopilot, faults);
             DrawFctlPanel(prim, faults);
             DrawControlInputPanel(pilot, sensors, faults, sim_settings, flaps);
             DrawAutopilotPanel(autopilot, sensors);
-            DrawSystemsPanel(trim, speedbrakes, gear, flight_phase, hydraulics, engines, weather, faults);
+            DrawSimOperationPanel(weather, faults);
+            DrawAircraftSystemsPanel(pilot, flaps, trim, speedbrakes, gear, hydraulics, engines, apu, alerts, autopilot);
         }
 
         ImGui::Render();

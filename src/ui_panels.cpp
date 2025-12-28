@@ -103,7 +103,7 @@ void DrawMasterPanel(AlertManager& alerts) {
 // ================================
 // ECAM E/WD Display
 // ================================
-void DrawEcamPanel(AlertManager& alerts, Sensors& sensors, PilotInput& pilot, Faults& faults, const PrimCore& prim, FlapsPosition flaps) {
+void DrawEcamPanel(AlertManager& alerts, Sensors& sensors, PilotInput& pilot, Faults& faults, const PrimCore& prim, FlapsPosition flaps, EngineState& engines, APUState& apu) {
     ImGui::SetNextWindowPos(ImVec2(10, 110), ImGuiCond_Once);
     ImGui::SetNextWindowSize(ImVec2(350, 480), ImGuiCond_Once);
 
@@ -165,6 +165,35 @@ void DrawEcamPanel(AlertManager& alerts, Sensors& sensors, PilotInput& pilot, Fa
     ImGui::Columns(1);
     ImGui::EndChild();
     ImGui::Spacing();
+
+    // Fire status display
+    if (engines.engine1_fire || engines.engine2_fire || apu.fire) {
+        ImGui::BeginChild("Fire", ImVec2(0, 60), true);
+        ImGui::TextColored(ImColor(AirbusColors::RED), "FIRE DETECTION:");
+        if (engines.engine1_fire) {
+            ImGui::TextColored(ImColor(AirbusColors::RED), "  ENG 1 FIRE");
+            if (engines.engine1_squib_released) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImColor(AirbusColors::AMBER), "(AGENT DISCH)");
+            }
+        }
+        if (engines.engine2_fire) {
+            ImGui::TextColored(ImColor(AirbusColors::RED), "  ENG 2 FIRE");
+            if (engines.engine2_squib_released) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImColor(AirbusColors::AMBER), "(AGENT DISCH)");
+            }
+        }
+        if (apu.fire) {
+            ImGui::TextColored(ImColor(AirbusColors::RED), "  APU FIRE");
+            if (apu.squib_released) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImColor(AirbusColors::AMBER), "(AGENT DISCH)");
+            }
+        }
+        ImGui::EndChild();
+        ImGui::Spacing();
+    }
 
     // Flaps/Config display
     ImGui::BeginChild("Config", ImVec2(0, 40), true);
@@ -369,12 +398,39 @@ static void DrawArtificialHorizon(ImVec2 center, float radius, float pitch_deg, 
 }
 
 // Helper to draw speed tape
-static void DrawSpeedTape(ImVec2 pos, ImVec2 size, float speed_knots) {
+static void DrawSpeedTape(ImVec2 pos, ImVec2 size, float speed_knots, bool unreliable = false) {
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
     // Background
-    draw_list->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(20, 20, 30, 230));
-    draw_list->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(100, 100, 100, 255), 0.0f, 0, 2.0f);
+    ImU32 bg_color = unreliable ? IM_COL32(60, 30, 30, 230) : IM_COL32(20, 20, 30, 230);
+    draw_list->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bg_color);
+
+    ImU32 border_color = unreliable ? AirbusColors::RED : IM_COL32(100, 100, 100, 255);
+    draw_list->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), border_color, 0.0f, 0, unreliable ? 3.0f : 2.0f);
+
+    // If unreliable, draw red stripes and SPD flag
+    if (unreliable) {
+        // Draw diagonal red/amber stripes
+        for (float y = pos.y; y < pos.y + size.y; y += 20.0f) {
+            for (float x = pos.x; x < pos.x + size.x; x += 10.0f) {
+                ImVec2 stripe[4] = {
+                    ImVec2(x, y),
+                    ImVec2(x + 5, y),
+                    ImVec2(x + 5, y + 10),
+                    ImVec2(x, y + 10)
+                };
+                draw_list->AddConvexPolyFilled(stripe, 4, IM_COL32(180, 80, 0, 100));
+            }
+        }
+
+        // Draw large "SPD" flag
+        ImVec2 flag_pos = ImVec2(pos.x + size.x * 0.5f - 20, pos.y + size.y * 0.5f - 15);
+        draw_list->AddRectFilled(flag_pos, ImVec2(flag_pos.x + 40, flag_pos.y + 30), IM_COL32(0, 0, 0, 200));
+        draw_list->AddRect(flag_pos, ImVec2(flag_pos.x + 40, flag_pos.y + 30), AirbusColors::AMBER, 0.0f, 0, 2.0f);
+        draw_list->AddText(ImVec2(flag_pos.x + 5, flag_pos.y + 7), AirbusColors::AMBER, "SPD");
+
+        return;  // Don't draw normal speed markings
+    }
 
     // Draw speed markings
     float center_y = pos.y + size.y * 0.5f;
@@ -517,7 +573,7 @@ static void DrawAltitudeTape(ImVec2 pos, ImVec2 size, float altitude_ft, float v
 // ================================
 // Primary Flight Display Elements
 // ================================
-void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput& pilot, const AutopilotState& ap) {
+void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput& pilot, const AutopilotState& ap, const Faults& faults) {
     ImGui::SetNextWindowPos(ImVec2(370, 10), ImGuiCond_Once);
     ImGui::SetNextWindowSize(ImVec2(420, 420), ImGuiCond_Once);
 
@@ -526,6 +582,9 @@ void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput
 
     const auto& fctl = prim.fctl_status();
     const auto& gpws = prim.gpws_callouts();
+
+    // Check for electrical failures that would disable PFD
+    bool pfd_unreliable = faults.total_electrical_fail || faults.partial_electrical_fail;
 
     // FMA (Flight Mode Annunciator) - top line with automation status
     ImGui::PushStyleColor(ImGuiCol_ChildBg, IM_COL32(0, 0, 0, 255));
@@ -591,13 +650,51 @@ void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput
 
     ImGui::InvisibleButton("canvas", canvas_size);
 
+    // If electrical failure, show red unreliable message instead of normal display
+    if (pfd_unreliable) {
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+        // Draw red background
+        draw_list->AddRectFilled(canvas_pos,
+            ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y),
+            IM_COL32(100, 0, 0, 200));
+
+        // Draw large "UNRELIABLE" message
+        ImVec2 center = ImVec2(canvas_pos.x + canvas_size.x * 0.5f, canvas_pos.y + canvas_size.y * 0.5f);
+
+        const char* msg = "UNRELIABLE";
+        ImFont* font = ImGui::GetFont();
+        float prev_scale = font->Scale;
+        font->Scale = 3.0f;
+        ImGui::PushFont(font);
+
+        ImVec2 text_size = ImGui::CalcTextSize(msg);
+        ImVec2 text_pos = ImVec2(center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f);
+
+        draw_list->AddText(text_pos, AirbusColors::RED, msg);
+
+        font->Scale = prev_scale;
+        ImGui::PopFont();
+
+        // Draw warning message below
+        const char* warn_msg = "ELEC FAULT - USE STANDBY INSTRUMENTS";
+        draw_list->AddText(
+            ImVec2(center.x - ImGui::CalcTextSize(warn_msg).x * 0.5f, center.y + 50),
+            AirbusColors::AMBER, warn_msg);
+
+        ImGui::Spacing();
+        ImGui::End();
+        ImGui::PopStyleColor();
+        return;
+    }
+
     // Draw artificial horizon in center
     ImVec2 horizon_center = ImVec2(canvas_pos.x + canvas_size.x * 0.5f, canvas_pos.y + canvas_size.y * 0.5f - 20);
     DrawArtificialHorizon(horizon_center, 100.0f, sensors.pitch_deg, sensors.roll_deg);
 
     // Draw speed tape on left
     ImVec2 speed_tape_pos = ImVec2(canvas_pos.x + 10, canvas_pos.y + 40);
-    DrawSpeedTape(speed_tape_pos, ImVec2(50, 300), sensors.ias_knots);
+    DrawSpeedTape(speed_tape_pos, ImVec2(50, 300), sensors.ias_knots, faults.pitot_blocked);
 
     // Draw altitude tape on right
     ImVec2 alt_tape_pos = ImVec2(canvas_pos.x + canvas_size.x - 60, canvas_pos.y + 40);
@@ -781,95 +878,34 @@ void DrawFctlPanel(const PrimCore& prim, Faults& faults) {
 }
 
 // ================================
-// Control Input Panel
+// Control Input Panel (Simplified - Sensor Override Only)
 // ================================
 void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, SimulationSettings& sim_settings, FlapsPosition& flaps) {
     ImGui::SetNextWindowPos(ImVec2(800, 10), ImGuiCond_Once);
     ImGui::SetNextWindowSize(ImVec2(280, 580), ImGuiCond_Once);
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
-    ImGui::Begin("SIMULATOR CONTROLS", nullptr);
+    ImGui::Begin("SENSOR OVERRIDE", nullptr);
 
-    TextCentered("FLIGHT SIMULATOR INPUTS", AirbusColors::AMBER);
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Pilot inputs (always available)
-    ImGui::TextColored(ImColor(AirbusColors::CYAN), "SIDESTICK INPUT:");
-    ImGui::SliderFloat("Pitch", &pilot.pitch, -1.0f, 1.0f, "%.2f");
-    ImGui::SliderFloat("Roll", &pilot.roll, -1.0f, 1.0f, "%.2f");
-
-    ImGui::Spacing();
-    ImGui::TextColored(ImColor(AirbusColors::CYAN), "FLAPS/SLATS LEVER:");
-
-    // Airbus-style flaps buttons (better than dropdown)
-    ImGui::PushStyleColor(ImGuiCol_Button, flaps == FlapsPosition::RETRACTED ? AirbusColors::GREEN : IM_COL32(60,60,60,255));
-    if (ImGui::Button("0", ImVec2(45, 25))) flaps = FlapsPosition::RETRACTED;
-    ImGui::PopStyleColor();
-
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, flaps == FlapsPosition::CONF_1 ? AirbusColors::GREEN : IM_COL32(60,60,60,255));
-    if (ImGui::Button("1", ImVec2(45, 25))) flaps = FlapsPosition::CONF_1;
-    ImGui::PopStyleColor();
-
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, flaps == FlapsPosition::CONF_2 ? AirbusColors::GREEN : IM_COL32(60,60,60,255));
-    if (ImGui::Button("2", ImVec2(45, 25))) flaps = FlapsPosition::CONF_2;
-    ImGui::PopStyleColor();
-
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, flaps == FlapsPosition::CONF_3 ? AirbusColors::GREEN : IM_COL32(60,60,60,255));
-    if (ImGui::Button("3", ImVec2(45, 25))) flaps = FlapsPosition::CONF_3;
-    ImGui::PopStyleColor();
-
-    ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, flaps == FlapsPosition::CONF_FULL ? AirbusColors::GREEN : IM_COL32(60,60,60,255));
-    if (ImGui::Button("FULL", ImVec2(45, 25))) flaps = FlapsPosition::CONF_FULL;
-    ImGui::PopStyleColor();
-
-    ImGui::Spacing();
-    ImGui::TextColored(ImColor(AirbusColors::CYAN), "THRUST LEVERS:");
-
-    // Color-code thrust slider
-    const char* thrust_label;
-    ImU32 thrust_color;
-    if (pilot.thrust < 0.2f) {
-        thrust_label = "IDLE";
-        thrust_color = AirbusColors::AMBER;
-    } else if (pilot.thrust < 0.4f) {
-        thrust_label = "LOW";
-        thrust_color = AirbusColors::WHITE;
-    } else if (pilot.thrust < 0.7f) {
-        thrust_label = "CLIMB";
-        thrust_color = AirbusColors::GREEN;
-    } else if (pilot.thrust < 0.9f) {
-        thrust_label = "MAX";
-        thrust_color = AirbusColors::GREEN;
-    } else {
-        thrust_label = "TOGA";
-        thrust_color = AirbusColors::MAGENTA;
-    }
-
-    ImGui::SliderFloat("Thrust", &pilot.thrust, 0.0f, 1.0f, "%.2f");
-    ImGui::SameLine();
-    ImGui::TextColored(ImColor(thrust_color), "[%s]", thrust_label);
-
-    ImGui::Spacing();
+    TextCentered("MANUAL SENSOR CONTROL", AirbusColors::AMBER);
     ImGui::Separator();
     ImGui::Spacing();
 
     // Manual sensor override toggle (for QF72-style scenarios)
     ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::AMBER);
     ImGui::PushStyleColor(ImGuiCol_CheckMark, AirbusColors::RED);
-    bool override_changed = ImGui::Checkbox("MANUAL SENSOR OVERRIDE (QF72 Mode)", &sim_settings.manual_sensor_override);
+    bool override_changed = ImGui::Checkbox("MANUAL SENSOR OVERRIDE", &sim_settings.manual_sensor_override);
     ImGui::PopStyleColor(2);
 
+    ImGui::Spacing();
+
     if (sim_settings.manual_sensor_override) {
-        ImGui::TextColored(ImColor(AirbusColors::RED), "  WARNING: Physics disabled!");
-        ImGui::TextColored(ImColor(IM_COL32(180,180,180,255)), "  You can inject false sensor data");
+        ImGui::TextColored(ImColor(AirbusColors::RED), "WARNING: Physics disabled!");
+        ImGui::TextColored(ImColor(IM_COL32(180,180,180,255)), "You can inject false sensor data");
+        ImGui::TextColored(ImColor(IM_COL32(180,180,180,255)), "for QF72-style scenarios.");
     } else {
-        ImGui::TextColored(ImColor(AirbusColors::GREEN), "  Physics simulation active");
-        ImGui::TextColored(ImColor(IM_COL32(180,180,180,255)), "  Sensors respond to control inputs");
+        ImGui::TextColored(ImColor(AirbusColors::GREEN), "Physics simulation active");
+        ImGui::TextColored(ImColor(IM_COL32(180,180,180,255)), "Sensors respond to control inputs");
     }
 
     ImGui::Spacing();
@@ -881,6 +917,7 @@ void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, 
 
     if (sim_settings.manual_sensor_override) {
         // Manual mode: Show editable sliders
+        ImGui::PushItemWidth(220);
         ImGui::SliderFloat("IAS (kt)", &sensors.ias_knots, 60.0f, 380.0f, "%.0f");
         ImGui::SliderFloat("Altitude (ft)", &sensors.altitude_ft, 0.0f, 45000.0f, "%.0f");
         ImGui::SliderFloat("V/S (fpm)", &sensors.vs_fpm, -6000.0f, 6000.0f, "%.0f");
@@ -889,45 +926,30 @@ void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, 
         ImGui::SliderFloat("Mach", &sensors.mach, 0.0f, 0.85f, "%.3f");
         ImGui::SliderFloat("Pitch (deg)", &sensors.pitch_deg, -30.0f, 30.0f, "%.1f");
         ImGui::SliderFloat("Roll (deg)", &sensors.roll_deg, -60.0f, 60.0f, "%.1f");
+        ImGui::PopItemWidth();
     } else {
         // Physics mode: Show read-only displays
         ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(40, 40, 40, 255));
         ImGui::PushStyleColor(ImGuiCol_SliderGrab, IM_COL32(100, 100, 100, 255));
         ImGui::BeginDisabled();
 
+        ImGui::PushItemWidth(220);
         ImGui::SliderFloat("IAS (kt)", &sensors.ias_knots, 60.0f, 380.0f, "%.0f");
         ImGui::SliderFloat("Altitude (ft)", &sensors.altitude_ft, 0.0f, 45000.0f, "%.0f");
         ImGui::SliderFloat("V/S (fpm)", &sensors.vs_fpm, -6000.0f, 6000.0f, "%.0f");
         ImGui::SliderFloat("AoA (deg)", &sensors.aoa_deg, -5.0f, 25.0f, "%.1f");
         ImGui::SliderFloat("Heading (deg)", &sensors.heading_deg, 0.0f, 359.0f, "%.0f");
+        ImGui::SliderFloat("Mach", &sensors.mach, 0.0f, 0.85f, "%.3f");
+        ImGui::SliderFloat("Pitch (deg)", &sensors.pitch_deg, -30.0f, 30.0f, "%.1f");
+        ImGui::SliderFloat("Roll (deg)", &sensors.roll_deg, -60.0f, 60.0f, "%.1f");
+        ImGui::PopItemWidth();
 
         ImGui::EndDisabled();
         ImGui::PopStyleColor(2);
 
-        ImGui::TextColored(ImColor(IM_COL32(150,150,150,255)), " (Computed from flight dynamics)");
+        ImGui::Spacing();
+        ImGui::TextColored(ImColor(IM_COL32(150,150,150,255)), "(Computed from flight dynamics)");
     }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Sensor faults
-    ImGui::TextColored(ImColor(AirbusColors::RED), "SENSOR FAULTS:");
-    ImGui::Checkbox("ADR 1 Failure", &faults.adr1_fail);
-    ImGui::Checkbox("Overspeed Sensor Bad", &faults.overspeed_sensor_bad);
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // System faults
-    ImGui::TextColored(ImColor(AirbusColors::RED), "SYSTEM FAULTS:");
-    ImGui::Checkbox("ELAC 1 Fault", &faults.elac1_fail);
-    ImGui::Checkbox("ELAC 2 Fault", &faults.elac2_fail);
-    ImGui::Checkbox("SEC 1 Fault", &faults.sec1_fail);
-    ImGui::Checkbox("Elevator Jam", &faults.elevator_jam);
-    ImGui::Checkbox("Aileron Jam", &faults.aileron_jam);
-    ImGui::Checkbox("Alpha Floor Fail", &faults.alpha_floor_fail);
 
     ImGui::End();
     ImGui::PopStyleColor();
@@ -938,203 +960,480 @@ void DrawControlInputPanel(PilotInput& pilot, Sensors& sensors, Faults& faults, 
 // ================================
 void DrawAutopilotPanel(AutopilotState& ap, const Sensors& sensors) {
     ImGui::SetNextWindowPos(ImVec2(10, 600), ImGuiCond_Once);
-    ImGui::SetNextWindowSize(ImVec2(780, 150), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(600, 120), ImGuiCond_Once);
 
     ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
     ImGui::Begin("AUTOPILOT / FCU", nullptr);
 
-    TextCentered("FLIGHT CONTROL UNIT", AirbusColors::CYAN);
+    TextCentered("FCU", AirbusColors::CYAN);
     ImGui::Separator();
-    ImGui::Spacing();
 
     // Layout: 4 columns for SPD, HDG, ALT, VS
     ImGui::Columns(4, nullptr, false);
 
     // ===== SPEED COLUMN =====
-    ImGui::BeginChild("SPD_Section", ImVec2(0, 80), true);
-    TextCentered("SPEED", AirbusColors::CYAN);
-    ImGui::Separator();
+    ImGui::BeginChild("SPD_Section", ImVec2(0, 65), true);
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "SPD");
 
     // Mode button
     ImU32 spd_btn_color = ap.spd_mode ? AirbusColors::GREEN : IM_COL32(60, 60, 60, 255);
     ImGui::PushStyleColor(ImGuiCol_Button, spd_btn_color);
-    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
-    if (ImGui::Button("SPD", ImVec2(60, 25))) {
+    if (ImGui::Button("##SPD", ImVec2(40, 20))) {
         ap.spd_mode = !ap.spd_mode;
         if (ap.spd_mode) {
-            // Sync target to current speed when mode is enabled
             ap.target_spd_knots = sensors.ias_knots;
         }
     }
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor();
 
     // Target value
-    ImGui::PushItemWidth(120);
+    ImGui::PushItemWidth(100);
     if (ap.spd_mode) {
         ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 80, 0, 255));
         ImGui::DragFloat("##spd_target", &ap.target_spd_knots, 1.0f, 100.0f, 350.0f, "%.0f kt");
         ImGui::PopStyleColor();
     } else {
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(40, 40, 40, 255));
         ImGui::BeginDisabled();
         ImGui::DragFloat("##spd_target", &ap.target_spd_knots, 1.0f, 100.0f, 350.0f, "%.0f kt");
         ImGui::EndDisabled();
-        ImGui::PopStyleColor();
     }
     ImGui::PopItemWidth();
-
-    // Current value display
-    ImGui::TextColored(ImColor(IM_COL32(150, 150, 150, 255)), "CUR: %.0f kt", sensors.ias_knots);
 
     ImGui::EndChild();
     ImGui::NextColumn();
 
     // ===== HEADING COLUMN =====
-    ImGui::BeginChild("HDG_Section", ImVec2(0, 80), true);
-    TextCentered("HEADING", AirbusColors::CYAN);
-    ImGui::Separator();
+    ImGui::BeginChild("HDG_Section", ImVec2(0, 65), true);
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "HDG");
 
     ImU32 hdg_btn_color = ap.hdg_mode ? AirbusColors::GREEN : IM_COL32(60, 60, 60, 255);
     ImGui::PushStyleColor(ImGuiCol_Button, hdg_btn_color);
-    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
-    if (ImGui::Button("HDG", ImVec2(60, 25))) {
+    if (ImGui::Button("##HDG", ImVec2(40, 20))) {
         ap.hdg_mode = !ap.hdg_mode;
         if (ap.hdg_mode) {
-            // Sync target to current heading when mode is enabled
             ap.target_hdg_deg = sensors.heading_deg;
         }
     }
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor();
 
-    ImGui::PushItemWidth(120);
+    ImGui::PushItemWidth(100);
     if (ap.hdg_mode) {
         ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 80, 0, 255));
         ImGui::DragFloat("##hdg_target", &ap.target_hdg_deg, 1.0f, 0.0f, 359.0f, "%.0f°");
         ImGui::PopStyleColor();
     } else {
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(40, 40, 40, 255));
         ImGui::BeginDisabled();
         ImGui::DragFloat("##hdg_target", &ap.target_hdg_deg, 1.0f, 0.0f, 359.0f, "%.0f°");
         ImGui::EndDisabled();
-        ImGui::PopStyleColor();
     }
     ImGui::PopItemWidth();
-
-    ImGui::TextColored(ImColor(IM_COL32(150, 150, 150, 255)), "CUR: %.0f°", sensors.heading_deg);
 
     ImGui::EndChild();
     ImGui::NextColumn();
 
     // ===== ALTITUDE COLUMN =====
-    ImGui::BeginChild("ALT_Section", ImVec2(0, 80), true);
-    TextCentered("ALTITUDE", AirbusColors::CYAN);
-    ImGui::Separator();
+    ImGui::BeginChild("ALT_Section", ImVec2(0, 65), true);
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "ALT");
 
     ImU32 alt_btn_color = ap.alt_mode ? AirbusColors::GREEN : IM_COL32(60, 60, 60, 255);
     ImGui::PushStyleColor(ImGuiCol_Button, alt_btn_color);
-    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
-    if (ImGui::Button("ALT", ImVec2(60, 25))) {
+    if (ImGui::Button("##ALT", ImVec2(40, 20))) {
         ap.alt_mode = !ap.alt_mode;
         if (ap.alt_mode) {
-            // Sync target to current altitude when mode is enabled
             ap.target_alt_ft = sensors.altitude_ft;
         }
     }
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor();
 
-    ImGui::PushItemWidth(120);
+    ImGui::PushItemWidth(100);
     if (ap.alt_mode) {
         ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 80, 0, 255));
         ImGui::DragFloat("##alt_target", &ap.target_alt_ft, 100.0f, 0.0f, 45000.0f, "%.0f ft");
         ImGui::PopStyleColor();
     } else {
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(40, 40, 40, 255));
         ImGui::BeginDisabled();
         ImGui::DragFloat("##alt_target", &ap.target_alt_ft, 100.0f, 0.0f, 45000.0f, "%.0f ft");
         ImGui::EndDisabled();
-        ImGui::PopStyleColor();
     }
     ImGui::PopItemWidth();
-
-    ImGui::TextColored(ImColor(IM_COL32(150, 150, 150, 255)), "CUR: %.0f ft", sensors.altitude_ft);
 
     ImGui::EndChild();
     ImGui::NextColumn();
 
     // ===== VERTICAL SPEED COLUMN =====
-    ImGui::BeginChild("VS_Section", ImVec2(0, 80), true);
-    TextCentered("VERT SPEED", AirbusColors::CYAN);
-    ImGui::Separator();
+    ImGui::BeginChild("VS_Section", ImVec2(0, 65), true);
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "V/S");
 
     ImU32 vs_btn_color = ap.vs_mode ? AirbusColors::GREEN : IM_COL32(60, 60, 60, 255);
     ImGui::PushStyleColor(ImGuiCol_Button, vs_btn_color);
-    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
-    if (ImGui::Button("V/S", ImVec2(60, 25))) {
+    if (ImGui::Button("##VS", ImVec2(40, 20))) {
         ap.vs_mode = !ap.vs_mode;
         if (ap.vs_mode) {
-            // Sync target to current VS when mode is enabled
             ap.target_vs_fpm = sensors.vs_fpm;
         }
     }
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor();
 
-    ImGui::PushItemWidth(120);
+    ImGui::PushItemWidth(100);
     if (ap.vs_mode) {
         ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(0, 80, 0, 255));
-        ImGui::DragFloat("##vs_target", &ap.target_vs_fpm, 100.0f, -6000.0f, 6000.0f, "%+.0f fpm");
+        ImGui::DragFloat("##vs_target", &ap.target_vs_fpm, 100.0f, -6000.0f, 6000.0f, "%+.0f");
         ImGui::PopStyleColor();
     } else {
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, IM_COL32(40, 40, 40, 255));
         ImGui::BeginDisabled();
-        ImGui::DragFloat("##vs_target", &ap.target_vs_fpm, 100.0f, -6000.0f, 6000.0f, "%+.0f fpm");
+        ImGui::DragFloat("##vs_target", &ap.target_vs_fpm, 100.0f, -6000.0f, 6000.0f, "%+.0f");
         ImGui::EndDisabled();
-        ImGui::PopStyleColor();
     }
     ImGui::PopItemWidth();
-
-    ImGui::TextColored(ImColor(IM_COL32(150, 150, 150, 255)), "CUR: %+.0f fpm", sensors.vs_fpm);
 
     ImGui::EndChild();
     ImGui::NextColumn();
 
     ImGui::Columns(1);
 
-    // Autothrust toggle (like real Airbus)
-    ImGui::Spacing();
-    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 200) * 0.5f);
+    // Autothrust and Disconnect buttons
+    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - 280) * 0.5f);
 
     ImU32 athr_color = ap.autothrust ? AirbusColors::GREEN : IM_COL32(60, 60, 60, 255);
     ImGui::PushStyleColor(ImGuiCol_Button, athr_color);
-    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
-    if (ImGui::Button("A/THR", ImVec2(80, 30))) {
+    if (ImGui::Button("A/THR", ImVec2(70, 25))) {
         ap.autothrust = !ap.autothrust;
         if (ap.autothrust) {
-            // When autothrust is enabled, sync SPD mode to current speed
             ap.spd_mode = true;
             ap.target_spd_knots = sensors.ias_knots;
         }
     }
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor();
 
-    // AP Disconnect Button (center bottom, like real Airbus)
     ImGui::SameLine();
     ImGui::PushStyleColor(ImGuiCol_Button, IM_COL32(200, 0, 0, 255));
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(255, 50, 50, 255));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, IM_COL32(150, 0, 0, 255));
-    ImGui::PushStyleColor(ImGuiCol_Text, AirbusColors::WHITE);
-    if (ImGui::Button("AP DISCONNECT", ImVec2(180, 35))) {
-        // Disconnect all autopilot modes (triggers master warning)
+    if (ImGui::Button("AP DISCONNECT", ImVec2(150, 25))) {
         ap.spd_mode = false;
         ap.hdg_mode = false;
         ap.alt_mode = false;
         ap.vs_mode = false;
         ap.autothrust = false;
     }
-    ImGui::PopStyleColor(4);
+    ImGui::PopStyleColor(2);
 
     ImGui::End();
     ImGui::PopStyleColor();
 }
+// ================================
+// Sim Operation Panel (Weather + Faults)
+// ================================
+void DrawSimOperationPanel(Weather& weather, Faults& faults) {
+    ImGui::SetNextWindowPos(ImVec2(1090, 10), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(350, 480), ImGuiCond_Once);
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
+    ImGui::Begin("SIM OPERATION", nullptr);
+
+    TextCentered("SIMULATION CONTROLS", AirbusColors::AMBER);
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // WEATHER
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "WEATHER CONDITIONS");
+    ImGui::PushItemWidth(250);
+    ImGui::SliderFloat("Wind Speed", &weather.wind_speed_knots, 0.0f, 100.0f, "%.0f kt");
+    ImGui::SliderFloat("Wind Direction", &weather.wind_direction_deg, 0.0f, 359.0f, "%.0f deg");
+    ImGui::SliderFloat("Turbulence", &weather.turbulence_intensity, 0.0f, 1.0f, "%.2f");
+    ImGui::SliderFloat("Windshear", &weather.windshear_intensity, 0.0f, 1.0f, "%.2f");
+    ImGui::PopItemWidth();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // FAULT INJECTION - All faults in one place
+    ImGui::TextColored(ImColor(AirbusColors::RED), "FAULT INJECTION");
+
+    // Sensor faults
+    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Sensors:");
+    ImGui::Checkbox("ADR 1 Failure", &faults.adr1_fail);
+    ImGui::Checkbox("Overspeed Sensor Bad", &faults.overspeed_sensor_bad);
+
+    ImGui::Spacing();
+
+    // Flight control computer faults
+    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Flight Control Computers:");
+    ImGui::Checkbox("ELAC 1 Fault", &faults.elac1_fail);
+    ImGui::Checkbox("ELAC 2 Fault", &faults.elac2_fail);
+    ImGui::Checkbox("SEC 1 Fault", &faults.sec1_fail);
+
+    ImGui::Spacing();
+
+    // Control surface faults
+    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Control Surfaces:");
+    ImGui::Checkbox("Elevator Jam", &faults.elevator_jam);
+    ImGui::Checkbox("Aileron Jam", &faults.aileron_jam);
+
+    ImGui::Spacing();
+
+    // System faults
+    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Systems:");
+    ImGui::Checkbox("Trim Runaway", &faults.trim_runaway);
+    ImGui::Checkbox("Alpha Floor Fail", &faults.alpha_floor_fail);
+
+    ImGui::Spacing();
+
+    // Hydraulic faults
+    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Hydraulics:");
+    ImGui::Checkbox("Green Hyd Fail", &faults.green_hyd_fail);
+    ImGui::Checkbox("Blue Hyd Fail", &faults.blue_hyd_fail);
+    ImGui::Checkbox("Yellow Hyd Fail", &faults.yellow_hyd_fail);
+
+    ImGui::Spacing();
+
+    // Electrical faults
+    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Electrical:");
+    ImGui::Checkbox("Total Electrical Fail", &faults.total_electrical_fail);
+    ImGui::Checkbox("Partial Electrical Fail", &faults.partial_electrical_fail);
+
+    ImGui::Spacing();
+
+    // Pitot/static faults
+    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Pitot/Static:");
+    ImGui::Checkbox("Pitot Blockage", &faults.pitot_blocked);
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+}
+
+// ================================
+// Aircraft Systems and Control Panel
+// ================================
+void DrawAircraftSystemsPanel(PilotInput& pilot, FlapsPosition& flaps, TrimSystem& trim,
+                               Speedbrakes& speedbrakes, LandingGear& gear,
+                               HydraulicSystem& hydraulics, EngineState& engines, APUState& apu,
+                               AlertManager& alerts, const AutopilotState& ap) {
+    ImGui::SetNextWindowPos(ImVec2(1090, 500), ImGuiCond_Once);
+    ImGui::SetNextWindowSize(ImVec2(350, 240), ImGuiCond_Once);
+
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, AirbusColors::DARK_BG);
+    ImGui::Begin("AIRCRAFT SYSTEMS AND CONTROL", nullptr);
+
+    TextCentered("FLIGHT CONTROLS & SYSTEMS", AirbusColors::GREEN);
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // FLIGHT CONTROL INPUTS
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "SIDESTICK INPUT:");
+    ImGui::PushItemWidth(150);
+    ImGui::SliderFloat("Pitch", &pilot.pitch, -1.0f, 1.0f, "%.2f");
+    ImGui::SameLine();
+    ImGui::SliderFloat("Roll", &pilot.roll, -1.0f, 1.0f, "%.2f");
+    ImGui::PopItemWidth();
+
+    ImGui::Spacing();
+
+    // FLAPS
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "FLAPS/SLATS:");
+    ImGui::PushStyleColor(ImGuiCol_Button, flaps == FlapsPosition::RETRACTED ? AirbusColors::GREEN : IM_COL32(60,60,60,255));
+    if (ImGui::Button("0", ImVec2(45, 20))) flaps = FlapsPosition::RETRACTED;
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, flaps == FlapsPosition::CONF_1 ? AirbusColors::GREEN : IM_COL32(60,60,60,255));
+    if (ImGui::Button("1", ImVec2(45, 20))) flaps = FlapsPosition::CONF_1;
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, flaps == FlapsPosition::CONF_2 ? AirbusColors::GREEN : IM_COL32(60,60,60,255));
+    if (ImGui::Button("2", ImVec2(45, 20))) flaps = FlapsPosition::CONF_2;
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, flaps == FlapsPosition::CONF_3 ? AirbusColors::GREEN : IM_COL32(60,60,60,255));
+    if (ImGui::Button("3", ImVec2(45, 20))) flaps = FlapsPosition::CONF_3;
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, flaps == FlapsPosition::CONF_FULL ? AirbusColors::GREEN : IM_COL32(60,60,60,255));
+    if (ImGui::Button("FULL", ImVec2(55, 20))) flaps = FlapsPosition::CONF_FULL;
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+
+    // THRUST LEVERS
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "THRUST:");
+    const char* thrust_label;
+    ImU32 thrust_color;
+    if (pilot.thrust < 0.2f) { thrust_label = "IDLE"; thrust_color = AirbusColors::AMBER; }
+    else if (pilot.thrust < 0.4f) { thrust_label = "LOW"; thrust_color = AirbusColors::WHITE; }
+    else if (pilot.thrust < 0.7f) { thrust_label = "CLIMB"; thrust_color = AirbusColors::GREEN; }
+    else if (pilot.thrust < 0.9f) { thrust_label = "MAX"; thrust_color = AirbusColors::GREEN; }
+    else { thrust_label = "TOGA"; thrust_color = AirbusColors::MAGENTA; }
+
+    ImGui::PushItemWidth(180);
+    ImGui::SliderFloat("##thrust", &pilot.thrust, 0.0f, 1.0f, "%.2f");
+    ImGui::PopItemWidth();
+    ImGui::SameLine();
+    ImGui::TextColored(ImColor(thrust_color), "[%s]", thrust_label);
+
+    // Show ATHR status indicator
+    if (ap.autothrust) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImColor(AirbusColors::GREEN), "A/THR");
+    }
+
+    ImGui::Spacing();
+
+    // Two-column layout for compact display
+    ImGui::Columns(2, nullptr, false);
+
+    // TRIM
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "PITCH TRIM");
+    ImGui::PushItemWidth(120);
+    ImGui::SliderFloat("##trim", &trim.pitch_trim_deg, -13.5f, 4.0f, "%.1f°");
+    ImGui::PopItemWidth();
+    ImGui::Checkbox("Auto##trim", &trim.auto_trim);
+
+    ImGui::Spacing();
+
+    // SPEEDBRAKES
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "SPEEDBRAKES");
+    ImGui::PushItemWidth(120);
+    ImGui::SliderFloat("##spdbr", &speedbrakes.position, 0.0f, 1.0f, "%.0f%%");
+    ImGui::PopItemWidth();
+    ImGui::Checkbox("Armed##spdbr", &speedbrakes.armed);
+
+    ImGui::NextColumn();
+
+    // LANDING GEAR
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "LANDING GEAR");
+    const char* gear_pos_names[] = {"UP", "DOWN", "TRANSIT"};
+    ImU32 gear_color = (gear.position == GearPosition::DOWN) ? AirbusColors::GREEN :
+                       (gear.position == GearPosition::UP) ? AirbusColors::AMBER : AirbusColors::RED;
+    ImGui::TextColored(ImColor(gear_color), "%s", gear_pos_names[(int)gear.position]);
+
+    if (ImGui::Button("DN", ImVec2(55, 20))) {
+        if (gear.position == GearPosition::UP) {
+            gear.position = GearPosition::TRANSIT;
+            gear.transit_timer = 0.0f;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("UP", ImVec2(55, 20))) {
+        if (gear.position == GearPosition::DOWN && !gear.weight_on_wheels) {
+            gear.position = GearPosition::TRANSIT;
+            gear.transit_timer = 0.0f;
+        }
+    }
+    ImGui::Text("WOW: %s", gear.weight_on_wheels ? "Y" : "N");
+
+    ImGui::Columns(1);
+    ImGui::Separator();
+
+    // HYDRAULICS (compact)
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "HYDRAULICS:");
+    ImGui::SameLine();
+    ImGui::TextColored(ImColor(hydraulics.green_avail ? AirbusColors::GREEN : AirbusColors::RED), "G");
+    ImGui::SameLine();
+    ImGui::TextColored(ImColor(hydraulics.blue_avail ? AirbusColors::GREEN : AirbusColors::RED), "B");
+    ImGui::SameLine();
+    ImGui::TextColored(ImColor(hydraulics.yellow_avail ? AirbusColors::GREEN : AirbusColors::RED), "Y");
+
+    ImGui::Spacing();
+
+    // ENGINES with fire squibs
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "ENGINES");
+    ImGui::Columns(2, "eng_cols", false);
+
+    // Engine 1
+    ImU32 eng1_color = engines.engine1_fire ? AirbusColors::RED :
+                       engines.engine1_running ? AirbusColors::GREEN : AirbusColors::AMBER;
+    ImGui::TextColored(ImColor(eng1_color), "ENG 1: %s",
+                       engines.engine1_fire ? "FIRE" :
+                       engines.engine1_running ? "RUN" : "OFF");
+    if (ImGui::Button("START##1", ImVec2(50, 18))) engines.engine1_running = true;
+    ImGui::SameLine();
+    if (ImGui::Button("STOP##1", ImVec2(50, 18))) engines.engine1_running = false;
+    ImGui::Checkbox("FIRE##1", &engines.engine1_fire);
+
+    // Fire squib button for Engine 1
+    ImGui::PushStyleColor(ImGuiCol_Button, engines.engine1_squib_released ? AirbusColors::AMBER : IM_COL32(100,0,0,255));
+    if (ImGui::Button("SQUIB##1", ImVec2(105, 20))) {
+        engines.engine1_squib_released = true;
+        if (engines.engine1_fire) {
+            engines.engine1_fire = false;  // Extinguish fire
+        }
+    }
+    ImGui::PopStyleColor();
+    if (engines.engine1_squib_released) {
+        ImGui::TextColored(ImColor(AirbusColors::AMBER), "AGENT DISCH");
+    }
+
+    ImGui::NextColumn();
+
+    // Engine 2
+    ImU32 eng2_color = engines.engine2_fire ? AirbusColors::RED :
+                       engines.engine2_running ? AirbusColors::GREEN : AirbusColors::AMBER;
+    ImGui::TextColored(ImColor(eng2_color), "ENG 2: %s",
+                       engines.engine2_fire ? "FIRE" :
+                       engines.engine2_running ? "RUN" : "OFF");
+    if (ImGui::Button("START##2", ImVec2(50, 18))) engines.engine2_running = true;
+    ImGui::SameLine();
+    if (ImGui::Button("STOP##2", ImVec2(50, 18))) engines.engine2_running = false;
+    ImGui::Checkbox("FIRE##2", &engines.engine2_fire);
+
+    // Fire squib button for Engine 2
+    ImGui::PushStyleColor(ImGuiCol_Button, engines.engine2_squib_released ? AirbusColors::AMBER : IM_COL32(100,0,0,255));
+    if (ImGui::Button("SQUIB##2", ImVec2(105, 20))) {
+        engines.engine2_squib_released = true;
+        if (engines.engine2_fire) {
+            engines.engine2_fire = false;  // Extinguish fire
+        }
+    }
+    ImGui::PopStyleColor();
+    if (engines.engine2_squib_released) {
+        ImGui::TextColored(ImColor(AirbusColors::AMBER), "AGENT DISCH");
+    }
+
+    ImGui::Columns(1);
+    ImGui::Separator();
+
+    // APU
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "APU (Auxiliary Power Unit)");
+    ImU32 apu_color = apu.fire ? AirbusColors::RED :
+                      apu.running ? AirbusColors::GREEN : AirbusColors::AMBER;
+    ImGui::TextColored(ImColor(apu_color), "Status: %s",
+                       apu.fire ? "FIRE" :
+                       apu.running ? "RUNNING" : "OFF");
+
+    if (ImGui::Button("START APU", ImVec2(80, 20))) apu.running = true;
+    ImGui::SameLine();
+    if (ImGui::Button("STOP APU", ImVec2(80, 20))) apu.running = false;
+    ImGui::SameLine();
+    ImGui::Checkbox("FIRE##APU", &apu.fire);
+
+    // APU fire squib
+    ImGui::PushStyleColor(ImGuiCol_Button, apu.squib_released ? AirbusColors::AMBER : IM_COL32(100,0,0,255));
+    if (ImGui::Button("APU SQUIB", ImVec2(105, 20))) {
+        apu.squib_released = true;
+        if (apu.fire) {
+            apu.fire = false;  // Extinguish fire
+        }
+    }
+    ImGui::PopStyleColor();
+    if (apu.squib_released) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImColor(AirbusColors::AMBER), "DISCHARGED");
+    }
+
+    // ECAM status summary (simple)
+    ImGui::Separator();
+    ImGui::TextColored(ImColor(AirbusColors::CYAN), "ECAM STATUS:");
+    if (alerts.masterWarningOn()) {
+        ImGui::TextColored(ImColor(AirbusColors::RED), "MASTER WARNING");
+    } else if (alerts.masterCautionOn()) {
+        ImGui::TextColored(ImColor(AirbusColors::AMBER), "MASTER CAUTION");
+    } else {
+        ImGui::TextColored(ImColor(AirbusColors::GREEN), "NORMAL");
+    }
+
+    ImGui::End();
+    ImGui::PopStyleColor();
+}
+
 void DrawSystemsPanel(TrimSystem& trim, Speedbrakes& speedbrakes, LandingGear& gear, FlightPhase phase,
                       HydraulicSystem& hydraulics, EngineState& engines, Weather& weather, Faults& faults) {
     ImGui::PushStyleColor(ImGuiCol_WindowBg, IM_COL32(20, 20, 20, 255));

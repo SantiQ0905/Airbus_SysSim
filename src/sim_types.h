@@ -84,6 +84,14 @@ struct EngineState {
     bool engine2_running = true;
     bool engine1_fire = false;
     bool engine2_fire = false;
+    bool engine1_squib_released = false;  // Fire extinguisher agent released
+    bool engine2_squib_released = false;
+};
+
+struct APUState {
+    bool running = false;
+    bool fire = false;
+    bool squib_released = false;
 };
 
 struct Weather {
@@ -106,6 +114,13 @@ struct Faults {
     bool green_hyd_fail = false;
     bool blue_hyd_fail = false;
     bool yellow_hyd_fail = false;
+
+    // Electrical faults
+    bool total_electrical_fail = false;   // Complete electrical failure (very rare)
+    bool partial_electrical_fail = false; // One bus failure (AC BUS 1 or similar)
+
+    // Pitot/static system faults
+    bool pitot_blocked = false;           // Pitot tube blockage -> unreliable airspeed
 };
 
 struct SimulationSettings {

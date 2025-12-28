@@ -12,7 +12,7 @@ static float clampf(float v, float lo, float hi) { return std::max(lo, std::min(
 static float lerpf(float a, float b, float t) { return a + (b - a) * t; }
 
 void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f, float dt_sec, AlertManager& am, AutopilotState& ap,
-                      TrimSystem& trim, const LandingGear& gear, HydraulicSystem& hydraulics, const EngineState& engines) {
+                      TrimSystem& trim, const LandingGear& gear, HydraulicSystem& hydraulics, const EngineState& engines, const APUState& apu) {
     // ========== Hydraulic Systems ==========
     hydraulics.green_avail = !f.green_hyd_fail;
     hydraulics.blue_avail = !f.blue_hyd_fail;
@@ -128,14 +128,30 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
         "* RAM AIR TURBINE ... DEPLOY",
         "* EMERGENCY DESCENT"
     });
+    // Engine fire alerts with detailed messages
     am.set(433, AlertLevel::WARNING, "ENG 1 FIRE", engines.engine1_fire, true, {
+        "* ENG 1 MASTER ..... OFF",
         "* ENG 1 FIRE HANDLE . PULL",
-        "* ENG 1 AGENT ....... DISCH"
+        "* IF FIRE PERSISTS:",
+        "  * ENG 1 AGENT 1 ... DISCH",
+        "  * WAIT 30 SEC",
+        "  * ENG 1 AGENT 2 ... DISCH"
     });
     am.set(434, AlertLevel::WARNING, "ENG 2 FIRE", engines.engine2_fire, true, {
+        "* ENG 2 MASTER ..... OFF",
         "* ENG 2 FIRE HANDLE . PULL",
-        "* ENG 2 AGENT ....... DISCH"
+        "* IF FIRE PERSISTS:",
+        "  * ENG 2 AGENT 1 ... DISCH",
+        "  * WAIT 30 SEC",
+        "  * ENG 2 AGENT 2 ... DISCH"
     });
+
+    // APU alerts
+    am.set(435, AlertLevel::WARNING, "APU FIRE", apu.fire, true, {
+        "* APU FIRE HANDLE ... PULL",
+        "* APU AGENT ......... DISCH"
+    });
+    am.set(436, AlertLevel::MEMO, "APU AVAIL", apu.running && !apu.fire, false);
 
     am.set(500, AlertLevel::WARNING, "ELEV JAM", f.elevator_jam, true, {
         "* AP ............... OFF",
@@ -171,6 +187,27 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     // AP Disconnect warning (triggers master warning like in real Airbus)
     // Latch it so it stays on screen until acknowledged
     am.set(800, AlertLevel::WARNING, "AP OFF", ap_just_disconnected, true);
+
+    // Electrical failures
+    am.set(810, AlertLevel::WARNING, "ELEC EMER CONFIG", f.total_electrical_fail, true, {
+        "* ALL BUSES ........ OFF",
+        "* EMER GEN ......... ON",
+        "* SHED ALL NON-ESS LOADS",
+        "* LAND ASAP"
+    });
+    am.set(811, AlertLevel::CAUTION, "ELEC AC BUS FAULT", f.partial_electrical_fail && !f.total_electrical_fail, true, {
+        "* AC BUS 1 ......... OFF",
+        "* GEN 1 ............ CHECK",
+        "* SHED NON-ESS LOADS"
+    });
+
+    // Pitot/static system failures
+    am.set(820, AlertLevel::CAUTION, "NAV ADR DISAGREE", f.pitot_blocked, true, {
+        "* SPD .............. UNRELIABLE",
+        "* ALT .............. UNRELIABLE",
+        "* USE STANDBY INSTRUMENTS",
+        "* PITCH & POWER ..... SET"
+    });
 
     // NORMAL memo only if no cautions/warnings shown
     bool haveAnyNonMemo = false;
