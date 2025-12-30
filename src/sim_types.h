@@ -16,6 +16,10 @@ struct Sensors {
     float pitch_deg = 0.0f;
     float roll_deg = 0.0f;
     float heading_deg = 0.0f;  // Magnetic heading (0-359)
+
+    // Smoothed flaps effects to prevent oscillation
+    float smoothed_flaps_lift_bonus = 0.0f;
+    float smoothed_flaps_drag_mult = 1.0f;
 };
 
 struct PilotInput {
@@ -88,6 +92,7 @@ enum class GearPosition {
 
 struct LandingGear {
     GearPosition position = GearPosition::DOWN;
+    GearPosition target_position = GearPosition::DOWN;  // Where gear is commanded to go
     bool weight_on_wheels = false;
     float transit_timer = 0.0f;  // Animation timer
 };

@@ -39,11 +39,39 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     }
 
     // Alpha protection: active when AoA high and speed low (only in normal law)
-    fctl_status_.alpha_prot = (fctl_status_.law == ControlLaw::NORMAL) &&
-                               (s.aoa_deg > 11.0f) && (s.ias_knots < 200.0f);
+    // With hysteresis to prevent oscillation
+    const float ALPHA_PROT_ENGAGE = 11.0f;
+    const float ALPHA_PROT_DISENGAGE = 9.0f;
+
+    if (fctl_status_.law == ControlLaw::NORMAL && s.ias_knots < 200.0f) {
+        if (!alpha_prot_engaged_ && s.aoa_deg > ALPHA_PROT_ENGAGE) {
+            alpha_prot_engaged_ = true;  // Engage at 11°
+        } else if (alpha_prot_engaged_ && s.aoa_deg < ALPHA_PROT_DISENGAGE) {
+            alpha_prot_engaged_ = false;  // Disengage at 9° (hysteresis)
+        }
+        fctl_status_.alpha_prot = alpha_prot_engaged_;
+    } else {
+        fctl_status_.alpha_prot = false;
+        alpha_prot_engaged_ = false;
+    }
 
     // Alpha floor: triggers when AoA very high (unless system failed)
-    fctl_status_.alpha_floor = !f.alpha_floor_fail && (s.aoa_deg > 14.0f) && (s.ias_knots < 160.0f);
+    // With hysteresis
+    static bool alpha_floor_engaged = false;
+    const float ALPHA_FLOOR_ENGAGE = 14.0f;
+    const float ALPHA_FLOOR_DISENGAGE = 12.5f;
+
+    if (!f.alpha_floor_fail && s.ias_knots < 160.0f) {
+        if (!alpha_floor_engaged && s.aoa_deg > ALPHA_FLOOR_ENGAGE) {
+            alpha_floor_engaged = true;
+        } else if (alpha_floor_engaged && s.aoa_deg < ALPHA_FLOOR_DISENGAGE) {
+            alpha_floor_engaged = false;
+        }
+        fctl_status_.alpha_floor = alpha_floor_engaged;
+    } else {
+        fctl_status_.alpha_floor = false;
+        alpha_floor_engaged = false;
+    }
 
     // High speed protection
     fctl_status_.high_speed_prot = (s.ias_knots > 340.0f) || (s.mach > 0.82f);
@@ -373,33 +401,42 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
         const float ALPHA_PROT_AOA = 11.0f;   // Start of alpha protection
         const float ALPHA_MAX_AOA = 15.0f;     // Absolute hard limit
 
-        if (s.aoa_deg > ALPHA_PROT_AOA) {
-            // Calculate protection strength (0.0 at alpha-prot, 1.0 at alpha-max)
-            float protection_strength = (s.aoa_deg - ALPHA_PROT_AOA) / (ALPHA_MAX_AOA - ALPHA_PROT_AOA);
-            protection_strength = clampf(protection_strength, 0.0f, 1.0f);
+        if (alpha_prot_engaged_) {
+            // Calculate target protection strength (0.0 at alpha-prot, 1.0 at alpha-max)
+            float target_protection_strength = (s.aoa_deg - ALPHA_PROT_AOA) / (ALPHA_MAX_AOA - ALPHA_PROT_AOA);
+            target_protection_strength = clampf(target_protection_strength, 0.0f, 1.0f);
 
-            // AGGRESSIVE automatic nose-down (Airbus does NOT let you stall in Normal Law!)
-            float auto_pitch_down = -0.5f - (protection_strength * 1.0f); // -0.5 to -1.5 (STRONG!)
+            // Smooth the protection strength to prevent abrupt transitions
+            float smooth_alpha = 1.0f - std::exp(-5.0f * dt_sec);  // Fast but smooth
+            smoothed_protection_strength_ = lerpf(smoothed_protection_strength_, target_protection_strength, smooth_alpha);
 
-            // COMPLETELY override pilot nose-up input when approaching alpha-max
+            // MODERATE automatic nose-down (reduced from original to prevent oscillation)
+            float auto_pitch_down = -0.2f - (smoothed_protection_strength_ * 0.5f); // -0.2 to -0.7 (moderate)
+
+            // Override pilot nose-up input when approaching alpha-max
             if (effective_pitch > 0.0f) {
-                // At alpha-prot (11°): 70% reduction
-                // At alpha-max (15°): 100% reduction (pilot input IGNORED)
-                float reduction = 0.7f + (protection_strength * 0.3f);
+                // Gradually reduce pilot nose-up authority
+                float reduction = 0.4f + (smoothed_protection_strength_ * 0.6f);  // 40% to 100% reduction
                 effective_pitch = effective_pitch * (1.0f - reduction);
             }
 
-            // Add strong automatic nose-down command
-            effective_pitch += auto_pitch_down * protection_strength;
+            // Add automatic nose-down command
+            effective_pitch += auto_pitch_down * smoothed_protection_strength_;
 
-            // HARD LIMIT: In Normal Law, effective pitch is clamped to prevent stall
-            // At alpha protection, we FORCE nose down - no exceptions
+            // HARD LIMIT: At alpha-max, force full nose down
             if (s.aoa_deg >= ALPHA_MAX_AOA) {
                 effective_pitch = -1.0f;  // FULL nose down at alpha-max!
-            } else {
-                effective_pitch = clampf(effective_pitch, -1.0f, -0.1f); // Force nose down
+            } else if (smoothed_protection_strength_ > 0.1f) {
+                // Only limit pitch when protection is significantly engaged
+                effective_pitch = clampf(effective_pitch, -1.0f, 0.2f); // Allow small nose-up
             }
+        } else {
+            // Reset smoothed protection strength when not engaged
+            smoothed_protection_strength_ = lerpf(smoothed_protection_strength_, 0.0f, 0.1f);
         }
+    } else {
+        // Reset when not in normal law or on ground
+        smoothed_protection_strength_ = 0.0f;
     }
 
     // Alpha floor adds nose-up pitch (auto pitch up when alpha floor active)
@@ -436,8 +473,8 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
         gear.transit_timer += dt_sec;
         if (gear.transit_timer >= 10.0f) {  // 10 seconds to extend/retract
             gear.transit_timer = 0.0f;
-            // Determine final position based on whether we're extending or retracting
-            // This would be controlled by pilot input, for now just complete the transit
+            // Complete the transit to the target position
+            gear.position = gear.target_position;
         }
     }
 
@@ -505,37 +542,46 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
 
     // ========== Flaps Effects ==========
     // Flaps increase lift (allows slower flight) and increase drag
-    float flaps_drag_mult = 1.0f;
-    float flaps_lift_bonus = 0.0f;
+    float target_flaps_drag_mult = 1.0f;
+    float target_flaps_lift_bonus = 0.0f;
     float stall_speed_reduction = 0.0f;
 
     switch (flaps) {
         case FlapsPosition::RETRACTED:
-            flaps_drag_mult = 1.0f;
-            flaps_lift_bonus = 0.0f;
+            target_flaps_drag_mult = 1.0f;
+            target_flaps_lift_bonus = 0.0f;
             stall_speed_reduction = 0.0f;
             break;
         case FlapsPosition::CONF_1:
-            flaps_drag_mult = 1.15f;
-            flaps_lift_bonus = 3.0f;
+            target_flaps_drag_mult = 1.15f;
+            target_flaps_lift_bonus = 3.0f;
             stall_speed_reduction = 15.0f;
             break;
         case FlapsPosition::CONF_2:
-            flaps_drag_mult = 1.35f;
-            flaps_lift_bonus = 6.0f;
+            target_flaps_drag_mult = 1.35f;
+            target_flaps_lift_bonus = 6.0f;
             stall_speed_reduction = 30.0f;
             break;
         case FlapsPosition::CONF_3:
-            flaps_drag_mult = 1.60f;
-            flaps_lift_bonus = 9.0f;
+            target_flaps_drag_mult = 1.60f;
+            target_flaps_lift_bonus = 9.0f;
             stall_speed_reduction = 45.0f;
             break;
         case FlapsPosition::CONF_FULL:
-            flaps_drag_mult = 2.0f;
-            flaps_lift_bonus = 12.0f;
+            target_flaps_drag_mult = 2.0f;
+            target_flaps_lift_bonus = 12.0f;
             stall_speed_reduction = 60.0f;
             break;
     }
+
+    // Smooth flaps effects to prevent oscillation (realistic flaps extension takes 3-5 seconds)
+    float flaps_alpha = 1.0f - std::exp(-0.5f * dt_sec);  // ~2 second time constant
+    s.smoothed_flaps_lift_bonus = lerpf(s.smoothed_flaps_lift_bonus, target_flaps_lift_bonus, flaps_alpha);
+    s.smoothed_flaps_drag_mult = lerpf(s.smoothed_flaps_drag_mult, target_flaps_drag_mult, flaps_alpha);
+
+    // Use smoothed values for flight dynamics
+    float flaps_drag_mult = s.smoothed_flaps_drag_mult;
+    float flaps_lift_bonus = s.smoothed_flaps_lift_bonus;
 
     // ========== Pitch Dynamics ==========
     // Elevator affects pitch rate

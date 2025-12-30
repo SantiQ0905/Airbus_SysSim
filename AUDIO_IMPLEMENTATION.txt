@@ -1,0 +1,593 @@
+================================================================================
+AIRBUS PRIM SIMULATOR - AUDIO IMPLEMENTATION GUIDE
+================================================================================
+Author: Santiago Quintana Moreno A01571222
+Date: 2025-12-30
+Version: 1.0
+
+================================================================================
+1. AUDIO FILES LOCATION AND ORGANIZATION
+================================================================================
+
+Directory Structure:
+--------------------
+PRIM_sim/
+├── assets/
+│   └── audio/
+│       ├── gpws/              # Ground Proximity Warning System callouts
+│       ├── alerts/            # ECAM alerts and warnings
+│       ├── systems/           # System sounds (gear, flaps, etc.)
+│       └── environment/       # Environmental sounds (wind, engines)
+
+Create the following directories:
+- D:\1.SQM\3.PERSONAL\1. DEVELOPMENT\CPP\PRIM_sim\assets\audio\gpws\
+- D:\1.SQM\3.PERSONAL\1. DEVELOPMENT\CPP\PRIM_sim\assets\audio\alerts\
+- D:\1.SQM\3.PERSONAL\1. DEVELOPMENT\CPP\PRIM_sim\assets\audio\systems\
+- D:\1.SQM\3.PERSONAL\1. DEVELOPMENT\CPP\PRIM_sim\assets\audio\environment\
+
+
+================================================================================
+2. AUDIO FILE FORMAT AND SPECIFICATIONS
+================================================================================
+
+Format: WAV (PCM, uncompressed)
+Sample Rate: 44100 Hz (CD quality)
+Bit Depth: 16-bit
+Channels: Mono (for callouts), Stereo (for environmental sounds)
+Encoding: PCM signed 16-bit little-endian
+
+Alternative Format: OGG Vorbis (compressed, smaller file size)
+- Quality: Q6 (192 kbps VBR)
+- For larger files or music tracks
+
+Why WAV?
+- Low latency playback (critical for safety callouts)
+- No decoding overhead
+- Compatible with all audio libraries
+- Industry standard for cockpit audio
+
+Why OGG as alternative?
+- Smaller file sizes (good for distribution)
+- Open format, no licensing issues
+- Good quality-to-size ratio
+
+
+================================================================================
+3. AUDIO LIBRARY INTEGRATION
+================================================================================
+
+Recommended Library: SDL_mixer 2.0+
+-------------------------------------
+SDL_mixer is already compatible with SDL2 (currently used for graphics/input)
+
+Dependencies:
+- SDL2 (already in project)
+- SDL2_mixer
+
+Installation (vcpkg):
+    vcpkg install sdl2-mixer:x64-windows
+
+Or manually download from: https://github.com/libsdl-org/SDL_mixer/releases
+
+
+Alternative Libraries:
+-----------------------
+1. OpenAL Soft (3D audio positioning)
+   - Useful for spatial cockpit sounds
+   - More complex to set up
+   - vcpkg install openal-soft:x64-windows
+
+2. miniaudio (single-header library)
+   - Lightweight, no dependencies
+   - Good for simple playback
+   - https://github.com/mackron/miniaudio
+
+
+================================================================================
+4. CODE IMPLEMENTATION
+================================================================================
+
+4.1 Header File Creation
+-------------------------
+Create: src/audio_manager.h
+
+#pragma once
+#include <SDL_mixer.h>
+#include <string>
+#include <unordered_map>
+
+class AudioManager {
+public:
+    AudioManager();
+    ~AudioManager();
+
+    bool initialize();
+    void shutdown();
+
+    // Load audio files
+    bool loadGPWSCallouts();
+    bool loadAlertSounds();
+    bool loadSystemSounds();
+
+    // Playback control
+    void playGPWSCallout(const std::string& callout);
+    void playAlert(int alert_id, bool is_warning);
+    void playSystemSound(const std::string& sound_name);
+
+    // Volume control
+    void setMasterVolume(int volume);  // 0-128
+    void setGPWSVolume(int volume);
+    void setAlertVolume(int volume);
+
+    // Stop functions
+    void stopAllSounds();
+    void stopGPWS();
+
+private:
+    bool initialized_ = false;
+
+    // Sound channels
+    int gpws_channel_ = 0;      // Dedicated channel for GPWS (highest priority)
+    int alert_channel_ = 1;     // Channel for alerts
+    int system_channel_ = 2;    // Channel for system sounds
+
+    // Sound storage
+    std::unordered_map<std::string, Mix_Chunk*> gpws_sounds_;
+    std::unordered_map<std::string, Mix_Chunk*> alert_sounds_;
+    std::unordered_map<std::string, Mix_Chunk*> system_sounds_;
+
+    Mix_Chunk* loadWAV(const std::string& filepath);
+};
+
+
+4.2 Implementation File
+------------------------
+Create: src/audio_manager.cpp
+
+#include "audio_manager.h"
+#include <iostream>
+
+AudioManager::AudioManager() {}
+
+AudioManager::~AudioManager() {
+    shutdown();
+}
+
+bool AudioManager::initialize() {
+    // Initialize SDL_mixer
+    if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) {
+        std::cerr << "SDL_mixer initialization failed: " << Mix_GetError() << std::endl;
+        return false;
+    }
+
+    // Allocate mixing channels (8 channels: GPWS, alerts, systems, etc.)
+    Mix_AllocateChannels(8);
+
+    // Set initial volumes
+    setMasterVolume(MIX_MAX_VOLUME);  // Max = 128
+
+    initialized_ = true;
+    return true;
+}
+
+void AudioManager::shutdown() {
+    if (!initialized_) return;
+
+    // Free all loaded sounds
+    for (auto& pair : gpws_sounds_) {
+        Mix_FreeChunk(pair.second);
+    }
+    for (auto& pair : alert_sounds_) {
+        Mix_FreeChunk(pair.second);
+    }
+    for (auto& pair : system_sounds_) {
+        Mix_FreeChunk(pair.second);
+    }
+
+    gpws_sounds_.clear();
+    alert_sounds_.clear();
+    system_sounds_.clear();
+
+    Mix_CloseAudio();
+    initialized_ = false;
+}
+
+Mix_Chunk* AudioManager::loadWAV(const std::string& filepath) {
+    Mix_Chunk* chunk = Mix_LoadWAV(filepath.c_str());
+    if (!chunk) {
+        std::cerr << "Failed to load " << filepath << ": " << Mix_GetError() << std::endl;
+    }
+    return chunk;
+}
+
+bool AudioManager::loadGPWSCallouts() {
+    const std::string base_path = "assets/audio/gpws/";
+
+    // Load all GPWS callouts
+    gpws_sounds_["2500"] = loadWAV(base_path + "2500.wav");
+    gpws_sounds_["1000"] = loadWAV(base_path + "1000.wav");
+    gpws_sounds_["500"] = loadWAV(base_path + "500.wav");
+    gpws_sounds_["400"] = loadWAV(base_path + "400.wav");
+    gpws_sounds_["300"] = loadWAV(base_path + "300.wav");
+    gpws_sounds_["200"] = loadWAV(base_path + "200.wav");
+    gpws_sounds_["100"] = loadWAV(base_path + "100.wav");
+    gpws_sounds_["50"] = loadWAV(base_path + "50.wav");
+    gpws_sounds_["40"] = loadWAV(base_path + "40.wav");
+    gpws_sounds_["30"] = loadWAV(base_path + "30.wav");
+    gpws_sounds_["20"] = loadWAV(base_path + "20.wav");
+    gpws_sounds_["10"] = loadWAV(base_path + "10.wav");
+    gpws_sounds_["RETARD"] = loadWAV(base_path + "retard.wav");
+    gpws_sounds_["PULL UP"] = loadWAV(base_path + "pull_up.wav");
+    gpws_sounds_["WINDSHEAR"] = loadWAV(base_path + "windshear.wav");
+
+    return true;
+}
+
+void AudioManager::playGPWSCallout(const std::string& callout) {
+    if (!initialized_) return;
+
+    auto it = gpws_sounds_.find(callout);
+    if (it != gpws_sounds_.end() && it->second != nullptr) {
+        // Stop any currently playing GPWS callout
+        Mix_HaltChannel(gpws_channel_);
+        // Play new callout on dedicated GPWS channel
+        Mix_PlayChannel(gpws_channel_, it->second, 0);
+    }
+}
+
+void AudioManager::setMasterVolume(int volume) {
+    Mix_MasterVolume(volume);  // 0-128
+}
+
+void AudioManager::setGPWSVolume(int volume) {
+    Mix_Volume(gpws_channel_, volume);
+}
+
+void AudioManager::stopAllSounds() {
+    Mix_HaltChannel(-1);  // -1 = all channels
+}
+
+void AudioManager::stopGPWS() {
+    Mix_HaltChannel(gpws_channel_);
+}
+
+
+4.3 Integration into PRIM Core
+-------------------------------
+In prim_core.h, add:
+
+#include "audio_manager.h"
+
+class PrimCore {
+public:
+    // ... existing code ...
+
+    void setAudioManager(AudioManager* audio_mgr) { audio_mgr_ = audio_mgr; }
+
+private:
+    AudioManager* audio_mgr_ = nullptr;
+    std::string last_callout_ = "";  // Track last played callout
+};
+
+
+In prim_core.cpp, updateGPWS() function, add after setting current_callout:
+
+void PrimCore::updateGPWS(...) {
+    // ... existing GPWS logic ...
+
+    // Play audio if callout changed
+    if (audio_mgr_ && gpws_callouts_.current_callout != last_callout_ &&
+        !gpws_callouts_.current_callout.empty()) {
+        audio_mgr_->playGPWSCallout(gpws_callouts_.current_callout);
+        last_callout_ = gpws_callouts_.current_callout;
+    }
+
+    // Reset when no callout
+    if (gpws_callouts_.current_callout.empty()) {
+        last_callout_ = "";
+    }
+}
+
+
+In main.cpp:
+
+#include "audio_manager.h"
+
+int main() {
+    // ... SDL initialization ...
+
+    // Initialize audio
+    AudioManager audio_manager;
+    if (!audio_manager.initialize()) {
+        std::cerr << "Audio initialization failed!" << std::endl;
+    }
+
+    if (!audio_manager.loadGPWSCallouts()) {
+        std::cerr << "Failed to load GPWS callouts!" << std::endl;
+    }
+
+    // Link to PRIM core
+    PrimCore prim;
+    prim.setAudioManager(&audio_manager);
+
+    // ... main loop ...
+
+    return 0;
+}
+
+
+4.4 CMakeLists.txt Update
+--------------------------
+Add SDL2_mixer to your CMakeLists.txt:
+
+find_package(SDL2_mixer CONFIG REQUIRED)
+
+target_link_libraries(PRIM_sim PRIVATE
+    SDL2::SDL2
+    SDL2::SDL2main
+    SDL2_mixer::SDL2_mixer
+    # ... other libraries ...
+)
+
+
+================================================================================
+5. COMPLETE AUDIO FILE LIST
+================================================================================
+
+5.1 GPWS CALLOUTS (Priority: CRITICAL)
+---------------------------------------
+Location: assets/audio/gpws/
+
+Altitude Callouts:
+ [1] 2500.wav          - "Two thousand five hundred"
+ [2] 1000.wav          - "One thousand"
+ [3] 500.wav           - "Five hundred"
+ [4] 400.wav           - "Four hundred"
+ [5] 300.wav           - "Three hundred"
+ [6] 200.wav           - "Two hundred"
+ [7] 100.wav           - "One hundred"
+ [8] 50.wav            - "Fifty"
+ [9] 40.wav            - "Forty"
+[10] 30.wav            - "Thirty"
+[11] 20.wav            - "Twenty"
+[12] 10.wav            - "Ten"
+
+Warning Callouts:
+[13] pull_up.wav       - "PULL UP! PULL UP!" (terrain warning, loud and urgent)
+[14] windshear.wav     - "WINDSHEAR! WINDSHEAR!" (windshear warning, urgent)
+
+Landing Callouts:
+[15] retard.wav        - "Retard, retard" (thrust reduction reminder)
+
+Total GPWS Files: 15
+
+
+5.2 ECAM ALERTS (Priority: HIGH)
+---------------------------------
+Location: assets/audio/gpws/alerts/
+
+Master Warning/Caution:
+[16] master_warning.wav    - "CAVALRY CHARGE" chime (3 tones: C-C-C, urgent)
+[17] master_caution.wav    - Single chime (C, attention-getting)
+
+Aural Alerts:
+[18] alpha_floor.wav       - Continuous tone (cricket sound) for alpha floor
+[19] overspeed.wav         - Continuous clacker sound
+[20] stall_warning.wav     - Pulsing tone
+[21] config_warning.wav    - "TOO LOW GEAR" / "TOO LOW FLAPS"
+[22] terrain_ahead.wav     - Synthetic voice: "TERRAIN AHEAD"
+[23] sink_rate.wav         - Synthetic voice: "SINK RATE"
+
+Total Alert Files: 8
+
+
+5.3 SYSTEM SOUNDS (Priority: MEDIUM)
+-------------------------------------
+Location: assets/audio/systems/
+
+[24] gear_down.wav         - Landing gear extension sound (hydraulic whine)
+[25] gear_up.wav           - Landing gear retraction sound
+[26] gear_locked.wav       - Landing gear lock clunk (3 clunks)
+[27] flaps_extend.wav      - Flap motor sound
+[28] flaps_retract.wav     - Flap motor sound (reverse)
+[29] speedbrake_extend.wav - Speedbrake deployment whoosh
+[30] autopilot_disco.wav   - "CAVALRY CHARGE" (AP disconnect warning)
+[31] button_click.wav      - Generic button press sound
+[32] switch_toggle.wav     - Generic switch sound
+
+Total System Files: 9
+
+
+5.4 ENVIRONMENTAL SOUNDS (Priority: LOW)
+-----------------------------------------
+Location: assets/audio/environment/
+
+[33] wind_ambient.wav      - Continuous wind noise (loop)
+[34] engine_idle.wav       - Engine idle sound (loop)
+[35] engine_climb.wav      - Engine climb power (loop)
+[36] engine_toga.wav       - Engine TOGA/max thrust (loop)
+[37] ground_roll.wav       - Runway rumble during takeoff/landing (loop)
+
+Total Environment Files: 5
+
+================================================================================
+GRAND TOTAL: 37 Audio Files
+================================================================================
+
+
+================================================================================
+6. AUDIO SOURCES AND ACQUISITION
+================================================================================
+
+Option 1: Professional Audio Libraries (RECOMMENDED)
+-----------------------------------------------------
+- FSX/P3D Sound Libraries (if you have flight sim licenses)
+- Professional aviation sound packs (search for "Airbus A320 soundpack")
+- Commercial libraries: Soundsnap, AudioJungle (search "cockpit" or "GPWS")
+
+Cost: $50-200 for complete professional pack
+
+
+Option 2: Free/Open Source
+---------------------------
+- FreeSound.org (search: "aircraft", "cockpit", "warning")
+  Requires attribution for some sounds
+- YouTube Audio Library (limited aviation sounds)
+- FlightGear open-source flight simulator sound packs
+  https://github.com/FlightGear/
+
+Cost: Free (with attribution)
+
+
+Option 3: Text-to-Speech (For Callouts)
+----------------------------------------
+- Google Cloud Text-to-Speech API (realistic voices)
+- Microsoft Azure Speech Service
+- Generate callouts programmatically with appropriate voice settings:
+  - Language: English (US or UK)
+  - Voice: Male, authoritative
+  - Speed: Slightly slower for clarity
+  - Pitch: Slightly lower for authority
+
+Cost: Free tier available, then $4-16 per million characters
+
+
+Option 4: Record Your Own
+--------------------------
+- Use a good quality microphone
+- Record in quiet environment
+- Speak clearly and authoritatively
+- Post-process: normalize, EQ, compression
+
+Software: Audacity (free), Adobe Audition (professional)
+Cost: Free (if you have equipment)
+
+
+================================================================================
+7. IMPLEMENTATION PRIORITY
+================================================================================
+
+Phase 1 - CRITICAL (Implement First):
+--------------------------------------
+✓ Audio system initialization
+✓ GPWS altitude callouts (2500, 1000, 500, 400, 300, 200, 100, 50, 40, 30, 20, 10)
+✓ PULL UP warning
+✓ WINDSHEAR warning
+✓ RETARD callout
+
+Phase 2 - HIGH (Implement Second):
+-----------------------------------
+✓ Master warning/caution chimes
+✓ Overspeed clacker
+✓ Alpha floor cricket
+✓ Autopilot disconnect
+
+Phase 3 - MEDIUM (Implement Third):
+------------------------------------
+✓ Landing gear sounds
+✓ Flap sounds
+✓ Speedbrake sounds
+✓ UI button/switch sounds
+
+Phase 4 - LOW (Implement Last):
+--------------------------------
+✓ Environmental sounds (wind, engines)
+✓ Ground roll rumble
+
+
+================================================================================
+8. TESTING PROCEDURE
+================================================================================
+
+1. Unit Test - Individual Sounds:
+   - Verify each WAV file loads without errors
+   - Check sample rate and format match specifications
+   - Listen to each sound for quality and clarity
+
+2. Integration Test - GPWS System:
+   - Start at 3000 ft altitude
+   - Descend and verify callouts trigger at correct altitudes
+   - Verify callouts play in sequence without overlap
+   - Test PULL UP warning (descend rapidly)
+   - Test WINDSHEAR warning
+   - Test RETARD callout (land and reach 20 ft)
+
+3. Volume Test:
+   - Verify volume controls work correctly
+   - Ensure GPWS is audible but not distorted at max volume
+   - Test channel separation (GPWS vs alerts vs systems)
+
+4. Performance Test:
+   - Monitor CPU usage during audio playback
+   - Verify no audio lag or stuttering
+   - Test multiple simultaneous sounds
+
+5. Edge Cases:
+   - Rapid altitude changes (verify no callout spam)
+   - System failures (verify audio stops appropriately)
+   - Save/load scenarios (verify audio state persists)
+
+
+================================================================================
+9. TROUBLESHOOTING
+================================================================================
+
+Problem: SDL_mixer fails to initialize
+Solution: Ensure SDL2_mixer.dll is in the same directory as executable
+          or in system PATH
+
+Problem: Audio files not found
+Solution: Verify relative path from executable location
+          Use absolute paths during development for debugging
+
+Problem: Audio crackling/popping
+Solution: Increase buffer size in Mix_OpenAudio (try 4096 instead of 2048)
+          Ensure sample rate matches (44100 Hz)
+
+Problem: GPWS callouts overlap
+Solution: Verify Mix_HaltChannel(gpws_channel_) is called before new callout
+          Check that current_callout changes are properly tracked
+
+Problem: High CPU usage
+Solution: Use OGG format for large files
+          Reduce number of allocated channels
+          Pre-load sounds instead of loading on-demand
+
+Problem: Volume too low/high
+Solution: Normalize audio files to -3dB peak
+          Adjust per-channel volumes instead of master volume
+
+
+================================================================================
+10. FUTURE ENHANCEMENTS
+================================================================================
+
+1. 3D Audio Positioning:
+   - Use OpenAL for spatial audio
+   - Position sounds based on cockpit location (left/right engine sounds)
+
+2. Radio Communications:
+   - Add ATC chatter
+   - Radio static/tuning sounds
+
+3. Dynamic Engine Sounds:
+   - Vary pitch/volume based on thrust setting
+   - Add spool-up/spool-down transitions
+
+4. Weather Sounds:
+   - Rain on windshield
+   - Thunder
+   - Heavy turbulence buffeting
+
+5. Crew Callouts:
+   - "V1", "Rotate", "Positive rate", "Gear up"
+   - "1000 to go", "Approaching minimums"
+
+6. Custom Voice Packs:
+   - Allow users to replace callout voices
+   - Support multiple languages
+
+
+================================================================================
+END OF AUDIO IMPLEMENTATION GUIDE
+================================================================================

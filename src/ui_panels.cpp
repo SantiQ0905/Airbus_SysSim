@@ -1596,14 +1596,16 @@ void DrawAircraftSystemsPanel(PilotInput& pilot, FlapsPosition& flaps, TrimSyste
     ImGui::TextColored(ImColor(gear_color), "%s", gear_pos_names[(int)gear.position]);
 
     if (ImGui::Button("DN", ImVec2(55, 20))) {
-        if (gear.position == GearPosition::UP) {
+        if (gear.position == GearPosition::UP || gear.position == GearPosition::TRANSIT) {
+            gear.target_position = GearPosition::DOWN;
             gear.position = GearPosition::TRANSIT;
             gear.transit_timer = 0.0f;
         }
     }
     ImGui::SameLine();
     if (ImGui::Button("UP", ImVec2(55, 20))) {
-        if (gear.position == GearPosition::DOWN && !gear.weight_on_wheels) {
+        if ((gear.position == GearPosition::DOWN || gear.position == GearPosition::TRANSIT) && !gear.weight_on_wheels) {
+            gear.target_position = GearPosition::UP;
             gear.position = GearPosition::TRANSIT;
             gear.transit_timer = 0.0f;
         }
@@ -1769,20 +1771,18 @@ void DrawSystemsPanel(TrimSystem& trim, Speedbrakes& speedbrakes, LandingGear& g
     ImGui::TextColored(ImColor(gear_color), "Position: %s", gear_pos_names[(int)gear.position]);
 
     if (ImGui::Button("GEAR DOWN", ImVec2(100, 25))) {
-        if (gear.position == GearPosition::UP) {
+        if (gear.position == GearPosition::UP || gear.position == GearPosition::TRANSIT) {
+            gear.target_position = GearPosition::DOWN;
             gear.position = GearPosition::TRANSIT;
             gear.transit_timer = 0.0f;
-        } else if (gear.position == GearPosition::TRANSIT) {
-            gear.position = GearPosition::DOWN;
         }
     }
     ImGui::SameLine();
     if (ImGui::Button("GEAR UP", ImVec2(100, 25))) {
-        if (gear.position == GearPosition::DOWN && !gear.weight_on_wheels) {
+        if ((gear.position == GearPosition::DOWN || gear.position == GearPosition::TRANSIT) && !gear.weight_on_wheels) {
+            gear.target_position = GearPosition::UP;
             gear.position = GearPosition::TRANSIT;
             gear.transit_timer = 0.0f;
-        } else if (gear.position == GearPosition::TRANSIT) {
-            gear.position = GearPosition::UP;
         }
     }
     ImGui::Text("Weight on Wheels: %s", gear.weight_on_wheels ? "YES" : "NO");

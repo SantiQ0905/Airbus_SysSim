@@ -39,4 +39,8 @@ private:
 
     float elevator_cmd_deg_ = 0.0f;
     float aileron_cmd_deg_  = 0.0f;
+
+    // Alpha protection hysteresis state
+    bool alpha_prot_engaged_ = false;
+    float smoothed_protection_strength_ = 0.0f;
 };
