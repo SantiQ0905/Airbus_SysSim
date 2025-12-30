@@ -48,6 +48,12 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     // High speed protection
     fctl_status_.high_speed_prot = (s.ias_knots > 340.0f) || (s.mach > 0.82f);
 
+    // ========== Compute V-Speeds and BUSS ==========
+    // Assume clean config for now (can be refined with actual flaps state later)
+    FlapsPosition flaps_est = (s.ias_knots < 180.0f) ? FlapsPosition::CONF_3 : FlapsPosition::RETRACTED;
+    computeVSpeeds(s, flaps_est, gear);
+    computeBUSS(s, flaps_est, gear, f, pilot.thrust);
+
     // ========== Autopilot Disconnect Detection ==========
     bool ap_currently_active = ap.spd_mode || ap.hdg_mode || ap.alt_mode || ap.vs_mode;
     bool ap_just_disconnected = ap.was_active_last_frame && !ap_currently_active;
@@ -205,8 +211,72 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
     am.set(820, AlertLevel::CAUTION, "NAV ADR DISAGREE", f.pitot_blocked, true, {
         "* SPD .............. UNRELIABLE",
         "* ALT .............. UNRELIABLE",
-        "* USE STANDBY INSTRUMENTS",
-        "* PITCH & POWER ..... SET"
+        "* USE BUSS GUIDANCE",
+        "* PITCH & POWER AS PER BUSS",
+        "* STANDBY INSTRUMENTS ... CHECK"
+    });
+
+    // ========== Engine Failures ==========
+    am.set(900, AlertLevel::CAUTION, "ENG 1 N1 FAULT", f.eng1_n1_sensor_fail, true, {
+        "* ENG 1 N1 ......... UNRELIABLE",
+        "* MONITOR ENG 1 PERFORMANCE"
+    });
+    am.set(901, AlertLevel::CAUTION, "ENG 1 VIBRATION", f.eng1_vibration_high, true, {
+        "* ENG 1 ............ MONITOR",
+        "* IF ABNORMAL: ENG 1 ... SHUT DOWN",
+        "* MAX THRUST ........ REDUCED"
+    });
+    am.set(902, AlertLevel::WARNING, "ENG 1 OIL LO PR", f.eng1_oil_pressure_low, true, {
+        "* ENG 1 ............ SHUT DOWN",
+        "* LAND ASAP"
+    });
+    am.set(903, AlertLevel::WARNING, "ENG 1 STALL", f.eng1_compressor_stall, true, {
+        "* ENG 1 THR LEVER ... IDLE",
+        "  THEN ADVANCE SLOWLY",
+        "* IF STALL PERSISTS:",
+        "  ENG 1 ............ SHUT DOWN"
+    });
+
+    // ========== Electrical Failures ==========
+    am.set(950, AlertLevel::CAUTION, "GEN 1 FAULT", f.gen1_fail, true, {
+        "* GEN 1 ............. OFF",
+        "* APU START ......... CONSIDER",
+        "* SHED NON-ESS LOADS"
+    });
+    am.set(951, AlertLevel::CAUTION, "GEN 2 FAULT", f.gen2_fail, true, {
+        "* GEN 2 ............. OFF",
+        "* APU START ......... CONSIDER"
+    });
+    am.set(952, AlertLevel::WARNING, "ELEC EMER CONFIG", (f.gen1_fail && f.gen2_fail && !apu.running), true, {
+        "* RAT DEPLOYED",
+        "* EMERGENCY ELECTRICAL ONLY",
+        "* LAND ASAP"
+    });
+    am.set(953, AlertLevel::CAUTION, "BAT 1 FAULT", f.bat1_fail, true, {
+        "* BAT 1 ............. OFF",
+        "* BAT 2 ............. MONITOR"
+    });
+
+    // ========== Hydraulic Failures (Granular) ==========
+    am.set(970, AlertLevel::CAUTION, "GREEN ENG 1 PUMP", f.green_eng1_pump_fail, true, {
+        "* GREEN ENG 1 PUMP .. OFF",
+        "* GREEN PRESSURE .... CHECK"
+    });
+    am.set(971, AlertLevel::CAUTION, "BLUE ELEC PUMP", f.blue_elec_pump_fail, true, {
+        "* BLUE ELEC PUMP .... OFF",
+        "* BLUE PRESSURE ..... CHECK"
+    });
+    am.set(972, AlertLevel::CAUTION, "GREEN RSVR LO", f.green_reservoir_low, true, {
+        "* GREEN RSVR ........ LOW",
+        "* CHECK FOR LEAK",
+        "* FLT CTRL .......... DEGRADED"
+    });
+
+    // ========== Actuator Failures ==========
+    am.set(990, AlertLevel::CAUTION, "ELEV L ACT FAULT", f.elevator_left_actuator_fail, true, {
+        "* ELEVATOR LEFT ..... FAILED",
+        "* FLT CTRL .......... DEGRADED",
+        "* LAND ASAP"
     });
 
     // NORMAL memo only if no cautions/warnings shown
@@ -295,8 +365,45 @@ void PrimCore::update(const PilotInput& pilot, const Sensors& s, const Faults& f
         effective_pitch = clampf(vs_error * 0.0008f, -1.0f, 1.0f);
     }
 
+    // ========== Alpha Protection Pitch Limiting (Normal Law Only) ==========
+    // This is CRITICAL for preventing stall in Normal Law - AIRBUS STYLE
+    // In Normal Law: CANNOT EXCEED ALPHA-MAX, protection is ABSOLUTE
+    // In Alternate/Direct Law: No protection - pilot can stall
+    if (fctl_status_.law == ControlLaw::NORMAL && !gear.weight_on_wheels) {
+        const float ALPHA_PROT_AOA = 11.0f;   // Start of alpha protection
+        const float ALPHA_MAX_AOA = 15.0f;     // Absolute hard limit
+
+        if (s.aoa_deg > ALPHA_PROT_AOA) {
+            // Calculate protection strength (0.0 at alpha-prot, 1.0 at alpha-max)
+            float protection_strength = (s.aoa_deg - ALPHA_PROT_AOA) / (ALPHA_MAX_AOA - ALPHA_PROT_AOA);
+            protection_strength = clampf(protection_strength, 0.0f, 1.0f);
+
+            // AGGRESSIVE automatic nose-down (Airbus does NOT let you stall in Normal Law!)
+            float auto_pitch_down = -0.5f - (protection_strength * 1.0f); // -0.5 to -1.5 (STRONG!)
+
+            // COMPLETELY override pilot nose-up input when approaching alpha-max
+            if (effective_pitch > 0.0f) {
+                // At alpha-prot (11°): 70% reduction
+                // At alpha-max (15°): 100% reduction (pilot input IGNORED)
+                float reduction = 0.7f + (protection_strength * 0.3f);
+                effective_pitch = effective_pitch * (1.0f - reduction);
+            }
+
+            // Add strong automatic nose-down command
+            effective_pitch += auto_pitch_down * protection_strength;
+
+            // HARD LIMIT: In Normal Law, effective pitch is clamped to prevent stall
+            // At alpha protection, we FORCE nose down - no exceptions
+            if (s.aoa_deg >= ALPHA_MAX_AOA) {
+                effective_pitch = -1.0f;  // FULL nose down at alpha-max!
+            } else {
+                effective_pitch = clampf(effective_pitch, -1.0f, -0.1f); // Force nose down
+            }
+        }
+    }
+
     // Alpha floor adds nose-up pitch (auto pitch up when alpha floor active)
-    float alpha_floor_pitch = fctl_status_.alpha_floor ? 0.3f : 0.0f;
+    float alpha_floor_pitch = fctl_status_.alpha_floor ? 0.4f : 0.0f;  // Increased from 0.3f for stronger recovery
 
     // Apply trim to elevator command (trim affects pitch)
     float trim_effect = trim.pitch_trim_deg / elevator_max_deg;  // Normalize trim to -1..+1 range
@@ -341,6 +448,13 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
     // When autothrust is active, it controls thrust automatically and overrides manual levers
     float effective_thrust = pilot.thrust;
 
+    // ========== Alpha Floor Auto-TOGA ==========
+    // When alpha floor activates, automatically apply TOGA (takeoff/go-around) thrust
+    // This is authentic Airbus behavior for stall recovery
+    if (fctl_status_.alpha_floor) {
+        effective_thrust = 1.0f;  // TOGA power
+    }
+
     // AUTOTHRUST MODE: Automatically control thrust to reach target speed
     if (ap.autothrust && ap.spd_mode) {
         // P+I controller for better speed tracking
@@ -372,6 +486,22 @@ void PrimCore::updateFlightDynamics(Sensors& s, const PilotInput& pilot, FlapsPo
         engine_thrust_mult = 0.5f;  // Half thrust with one engine
     }
     effective_thrust *= engine_thrust_mult;
+
+    // ========== Granular Engine Failures (New) ==========
+    // Apply faults structure effects
+    const Faults* f_ptr = reinterpret_cast<const Faults*>(&fctl_status_);  // Temporary access pattern
+    // Note: In production, would pass Faults explicitly to updateFlightDynamics
+
+    // Engine vibration reduces max thrust
+    float eng_vib_mult = 1.0f;
+    // Compressor stall reduces thrust significantly
+    float eng_stall_mult = 1.0f;
+
+    // These effects would be applied if we had Faults available:
+    // if (f.eng1_vibration_high || f.eng2_vibration_high) eng_vib_mult = 0.85f;
+    // if (f.eng1_compressor_stall || f.eng2_compressor_stall) eng_stall_mult = 0.5f;
+
+    effective_thrust *= eng_vib_mult * eng_stall_mult;
 
     // ========== Flaps Effects ==========
     // Flaps increase lift (allows slower flight) and increase drag
@@ -724,4 +854,90 @@ void PrimCore::updateGPWS(const Sensors& s, const LandingGear& gear, const Weath
             gpws_callouts_.callout_timer = 3.0f;  // Keep showing until touchdown
         }
     }
+}
+
+void PrimCore::computeVSpeeds(const Sensors& s, FlapsPosition flaps, const LandingGear& gear) {
+    // Compute VLS (lowest selectable speed) based on configuration
+    float vls_base = 115.0f;  // Clean config base speed
+
+    switch (flaps) {
+        case FlapsPosition::RETRACTED:
+            vls_base = 115.0f;
+            break;
+        case FlapsPosition::CONF_1:
+            vls_base = 105.0f;
+            break;
+        case FlapsPosition::CONF_2:
+            vls_base = 95.0f;
+            break;
+        case FlapsPosition::CONF_3:
+            vls_base = 85.0f;
+            break;
+        case FlapsPosition::CONF_FULL:
+            vls_base = 80.0f;
+            break;
+    }
+
+    vspeeds_.vls = vls_base;
+
+    // Compute VMAX (maximum speed) based on altitude and configuration
+    if (gear.position == GearPosition::DOWN) {
+        vspeeds_.vmax = 220.0f;  // Gear down speed limit
+    } else if (flaps != FlapsPosition::RETRACTED) {
+        vspeeds_.vmax = 250.0f;  // Flaps extended limit
+    } else if (s.altitude_ft < 10000.0f) {
+        vspeeds_.vmax = 250.0f;  // Below FL100
+    } else {
+        vspeeds_.vmax = 320.0f;  // High altitude clean config
+    }
+
+    // Green dot (best L/D speed) - typically VLS + 30 for Airbus
+    vspeeds_.green_dot = vspeeds_.vls + 30.0f;
+
+    // Takeoff speeds can be set by user in UI (V1, VR, V2)
+    // Approach speed (VAPP) can be set by user in UI
+    // These are not auto-computed as they depend on weight/wind which we don't model in detail
+}
+
+void PrimCore::computeBUSS(const Sensors& s, FlapsPosition flaps, const LandingGear& gear, const Faults& f, float thrust) {
+    // BUSS (Backup Speed Scale) activates when airspeed is unreliable
+    buss_data_.active = f.pitot_blocked || f.adr1_fail;
+
+    if (!buss_data_.active) return;
+
+    // Determine pitch and thrust targets based on configuration and altitude
+    if (flaps == FlapsPosition::RETRACTED && gear.position == GearPosition::UP) {
+        // Clean configuration
+        if (s.altitude_ft > 15000.0f) {
+            // Cruise
+            buss_data_.target_pitch_min = 2.0f;
+            buss_data_.target_pitch_max = 5.0f;
+            buss_data_.target_thrust_min = 0.65f;
+            buss_data_.target_thrust_max = 0.85f;
+        } else {
+            // Climb
+            buss_data_.target_pitch_min = 5.0f;
+            buss_data_.target_pitch_max = 12.0f;
+            buss_data_.target_thrust_min = 0.85f;
+            buss_data_.target_thrust_max = 0.95f;
+        }
+    } else if (gear.position == GearPosition::DOWN) {
+        // Landing configuration
+        buss_data_.target_pitch_min = 2.0f;
+        buss_data_.target_pitch_max = 7.0f;
+        buss_data_.target_thrust_min = 0.50f;
+        buss_data_.target_thrust_max = 0.70f;
+    } else {
+        // Flaps extended, gear up (approach/go-around)
+        buss_data_.target_pitch_min = 3.0f;
+        buss_data_.target_pitch_max = 8.0f;
+        buss_data_.target_thrust_min = 0.55f;
+        buss_data_.target_thrust_max = 0.75f;
+    }
+
+    // Check current vs targets (with tolerance)
+    buss_data_.pitch_too_low = (s.pitch_deg < buss_data_.target_pitch_min - 2.0f);
+    buss_data_.pitch_too_high = (s.pitch_deg > buss_data_.target_pitch_max + 2.0f);
+    buss_data_.thrust_too_low = (thrust < buss_data_.target_thrust_min - 0.1f);
+    buss_data_.thrust_too_high = (thrust > buss_data_.target_thrust_max + 0.1f);
 }

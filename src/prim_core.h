@@ -15,6 +15,8 @@ public:
     const FlightControlStatus& fctl_status() const { return fctl_status_; }
     const EngineData& engine_data() const { return engine_data_; }
     const GPWSCallouts& gpws_callouts() const { return gpws_callouts_; }
+    const VSpeeds& vspeeds() const { return vspeeds_; }
+    const BUSSData& buss_data() const { return buss_data_; }
 
     void update(const PilotInput& pilot, const Sensors& s, const Faults& f, float dt_sec, AlertManager& am, AutopilotState& ap,
                 TrimSystem& trim, const LandingGear& gear, HydraulicSystem& hydraulics, const EngineState& engines, const APUState& apu);
@@ -29,6 +31,11 @@ private:
     FlightControlStatus fctl_status_{};
     EngineData engine_data_{};
     GPWSCallouts gpws_callouts_{};
+    VSpeeds vspeeds_{};
+    BUSSData buss_data_{};
+
+    void computeVSpeeds(const Sensors& s, FlapsPosition flaps, const LandingGear& gear);
+    void computeBUSS(const Sensors& s, FlapsPosition flaps, const LandingGear& gear, const Faults& f, float thrust);
 
     float elevator_cmd_deg_ = 0.0f;
     float aileron_cmd_deg_  = 0.0f;

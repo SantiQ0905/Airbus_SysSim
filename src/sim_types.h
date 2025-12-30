@@ -32,6 +32,37 @@ enum class FlapsPosition {
     CONF_FULL = 4   // Flaps Full
 };
 
+struct VSpeeds {
+    float v1 = 0.0f;        // Decision speed (knots)
+    float vr = 0.0f;        // Rotation speed (knots)
+    float v2 = 0.0f;        // Takeoff safety speed (knots)
+    float vapp = 0.0f;      // Approach speed (knots)
+    float vls = 0.0f;       // Lowest selectable speed (auto-computed)
+    float vmax = 0.0f;      // Maximum speed (auto-computed)
+    float green_dot = 0.0f; // Best L/D speed (auto-computed)
+    bool display_takeoff_speeds = false;
+    bool display_approach_speeds = false;
+};
+
+struct ILSData {
+    bool localizer_valid = false;
+    bool glideslope_valid = false;
+    float localizer_deviation = 0.0f;  // -2.5 to +2.5 dots
+    float glideslope_deviation = 0.0f; // -2.5 to +2.5 dots
+};
+
+struct BUSSData {
+    bool active = false;
+    float target_pitch_min = 0.0f;
+    float target_pitch_max = 0.0f;
+    float target_thrust_min = 0.0f;
+    float target_thrust_max = 0.0f;
+    bool pitch_too_low = false;
+    bool pitch_too_high = false;
+    bool thrust_too_low = false;
+    bool thrust_too_high = false;
+};
+
 struct EngineData {
     float n1_percent = 50.0f;   // Engine N1 (fan speed)
     float n2_percent = 75.0f;   // Engine N2 (core speed)
@@ -121,6 +152,57 @@ struct Faults {
 
     // Pitot/static system faults
     bool pitot_blocked = false;           // Pitot tube blockage -> unreliable airspeed
+
+    // ========== Engine Sensor Failures ==========
+    bool eng1_n1_sensor_fail = false;
+    bool eng1_n2_sensor_fail = false;
+    bool eng1_egt_sensor_fail = false;
+    bool eng2_n1_sensor_fail = false;
+    bool eng2_n2_sensor_fail = false;
+    bool eng2_egt_sensor_fail = false;
+
+    // ========== Engine Mechanical Failures ==========
+    bool eng1_vibration_high = false;
+    bool eng2_vibration_high = false;
+    bool eng1_oil_pressure_low = false;
+    bool eng2_oil_pressure_low = false;
+    bool eng1_compressor_stall = false;
+    bool eng2_compressor_stall = false;
+
+    // ========== Electrical System Failures ==========
+    // Generators
+    bool gen1_fail = false;
+    bool gen2_fail = false;
+    bool apu_gen_fail = false;
+
+    // Batteries
+    bool bat1_fail = false;
+    bool bat2_fail = false;
+
+    // Buses
+    bool ac_bus1_fail = false;
+    bool ac_bus2_fail = false;
+
+    // RAT (Ram Air Turbine - emergency generator)
+    bool rat_deployed = false;
+    bool rat_fault = false;
+
+    // ========== Hydraulic System Failures (Granular) ==========
+    // Pumps
+    bool green_eng1_pump_fail = false;
+    bool blue_elec_pump_fail = false;
+    bool yellow_eng1_pump_fail = false;
+
+    // Reservoirs
+    bool green_reservoir_low = false;
+    bool blue_reservoir_low = false;
+    bool yellow_reservoir_low = false;
+
+    // ========== Flight Control Actuator Failures ==========
+    bool elevator_left_actuator_fail = false;
+    bool elevator_right_actuator_fail = false;
+    bool aileron_left_actuator_fail = false;
+    bool aileron_right_actuator_fail = false;
 };
 
 struct SimulationSettings {

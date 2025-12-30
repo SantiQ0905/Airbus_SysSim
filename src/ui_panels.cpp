@@ -397,44 +397,181 @@ static void DrawArtificialHorizon(ImVec2 center, float radius, float pitch_deg, 
     draw_list->AddTriangleFilled(tri[0], tri[1], tri[2], IM_COL32(255, 255, 0, 255));
 }
 
-// Helper to draw speed tape
-static void DrawSpeedTape(ImVec2 pos, ImVec2 size, float speed_knots, bool unreliable = false) {
+// Helper to draw BUSS (Backup Speed Scale) - Airbus style vertical tape
+static void DrawBUSS(ImVec2 pos, ImVec2 size, const BUSSData& buss, float current_pitch, float current_thrust) {
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
     // Background
-    ImU32 bg_color = unreliable ? IM_COL32(60, 30, 30, 230) : IM_COL32(20, 20, 30, 230);
-    draw_list->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), bg_color);
+    draw_list->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(10, 10, 15, 240));
 
-    ImU32 border_color = unreliable ? AirbusColors::RED : IM_COL32(100, 100, 100, 255);
-    draw_list->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), border_color, 0.0f, 0, unreliable ? 3.0f : 2.0f);
+    // Draw vertical pitch tape with colored zones
+    float pitch_pixels_per_deg = size.y / 30.0f;  // Display -5 to +25 degrees
+    float center_y = pos.y + size.y * 0.6f;  // Pitch reference point
 
-    // If unreliable, draw red stripes and SPD flag
-    if (unreliable) {
-        // Draw diagonal red/amber stripes
-        for (float y = pos.y; y < pos.y + size.y; y += 20.0f) {
-            for (float x = pos.x; x < pos.x + size.x; x += 10.0f) {
-                ImVec2 stripe[4] = {
-                    ImVec2(x, y),
-                    ImVec2(x + 5, y),
-                    ImVec2(x + 5, y + 10),
-                    ImVec2(x, y + 10)
-                };
-                draw_list->AddConvexPolyFilled(stripe, 4, IM_COL32(180, 80, 0, 100));
-            }
+    // BUSS zones (Airbus style - stacked colored rectangles)
+    // Red zone (too low pitch)
+    float red_low_top = center_y + (5.0f - buss.target_pitch_min) * pitch_pixels_per_deg;
+    draw_list->AddRectFilled(
+        ImVec2(pos.x + 5, red_low_top),
+        ImVec2(pos.x + size.x - 5, pos.y + size.y - 5),
+        IM_COL32(180, 0, 0, 100)
+    );
+
+    // Green zone (safe pitch range)
+    float green_top = center_y + (5.0f - buss.target_pitch_max) * pitch_pixels_per_deg;
+    float green_bottom = center_y + (5.0f - buss.target_pitch_min) * pitch_pixels_per_deg;
+    draw_list->AddRectFilled(
+        ImVec2(pos.x + 5, green_top),
+        ImVec2(pos.x + size.x - 5, green_bottom),
+        IM_COL32(0, 150, 0, 120)
+    );
+
+    // Amber zone (too high pitch)
+    float amber_top = pos.y + 5;
+    draw_list->AddRectFilled(
+        ImVec2(pos.x + 5, amber_top),
+        ImVec2(pos.x + size.x - 5, green_top),
+        IM_COL32(200, 120, 0, 100)
+    );
+
+    // Draw pitch scale marks
+    for (int pitch = 0; pitch <= 20; pitch += 5) {
+        float y = center_y + (5.0f - pitch) * pitch_pixels_per_deg;
+        if (y >= pos.y && y <= pos.y + size.y) {
+            draw_list->AddLine(ImVec2(pos.x + 5, y), ImVec2(pos.x + 15, y), AirbusColors::WHITE, 1.0f);
+            char pitch_label[8];
+            snprintf(pitch_label, sizeof(pitch_label), "%d°", pitch);
+            draw_list->AddText(ImVec2(pos.x + 18, y - 7), AirbusColors::WHITE, pitch_label);
         }
+    }
 
-        // Draw large "SPD" flag
-        ImVec2 flag_pos = ImVec2(pos.x + size.x * 0.5f - 20, pos.y + size.y * 0.5f - 15);
-        draw_list->AddRectFilled(flag_pos, ImVec2(flag_pos.x + 40, flag_pos.y + 30), IM_COL32(0, 0, 0, 200));
-        draw_list->AddRect(flag_pos, ImVec2(flag_pos.x + 40, flag_pos.y + 30), AirbusColors::AMBER, 0.0f, 0, 2.0f);
-        draw_list->AddText(ImVec2(flag_pos.x + 5, flag_pos.y + 7), AirbusColors::AMBER, "SPD");
+    // Current pitch indicator (large triangle)
+    float current_y = center_y + (5.0f - current_pitch) * pitch_pixels_per_deg;
+    current_y = clampf(current_y, pos.y + 10, pos.y + size.y - 10);
 
-        return;  // Don't draw normal speed markings
+    ImVec2 tri[3] = {
+        ImVec2(pos.x + size.x - 5, current_y),
+        ImVec2(pos.x + size.x - 15, current_y - 6),
+        ImVec2(pos.x + size.x - 15, current_y + 6)
+    };
+    ImU32 pitch_color = (buss.pitch_too_low || buss.pitch_too_high) ? AirbusColors::AMBER : AirbusColors::GREEN;
+    draw_list->AddTriangleFilled(tri[0], tri[1], tri[2], pitch_color);
+    draw_list->AddTriangle(tri[0], tri[1], tri[2], AirbusColors::WHITE, 2.0f);
+
+    // Thrust bar on the side (vertical)
+    float thrust_bar_x = pos.x + size.x + 5;
+    float thrust_bar_height = size.y - 40;
+    float thrust_bar_y = pos.y + 20;
+
+    // Thrust background
+    draw_list->AddRectFilled(
+        ImVec2(thrust_bar_x, thrust_bar_y),
+        ImVec2(thrust_bar_x + 15, thrust_bar_y + thrust_bar_height),
+        IM_COL32(30, 30, 30, 200)
+    );
+    draw_list->AddRect(
+        ImVec2(thrust_bar_x, thrust_bar_y),
+        ImVec2(thrust_bar_x + 15, thrust_bar_y + thrust_bar_height),
+        AirbusColors::WHITE, 0.0f, 0, 1.0f
+    );
+
+    // Thrust target zone (green)
+    float thrust_range = 1.0f;
+    float thrust_min_y = thrust_bar_y + thrust_bar_height * (1.0f - buss.target_thrust_max / thrust_range);
+    float thrust_max_y = thrust_bar_y + thrust_bar_height * (1.0f - buss.target_thrust_min / thrust_range);
+    draw_list->AddRectFilled(
+        ImVec2(thrust_bar_x + 1, thrust_min_y),
+        ImVec2(thrust_bar_x + 14, thrust_max_y),
+        IM_COL32(0, 150, 0, 150)
+    );
+
+    // Current thrust indicator
+    float current_thrust_y = thrust_bar_y + thrust_bar_height * (1.0f - current_thrust);
+    draw_list->AddLine(
+        ImVec2(thrust_bar_x - 3, current_thrust_y),
+        ImVec2(thrust_bar_x + 18, current_thrust_y),
+        pitch_color, 3.0f
+    );
+
+    // Labels
+    draw_list->AddText(ImVec2(pos.x + 5, pos.y + 5), AirbusColors::AMBER, "BUSS");
+    char thrust_label[16];
+    snprintf(thrust_label, sizeof(thrust_label), "THR");
+    draw_list->AddText(ImVec2(thrust_bar_x - 5, thrust_bar_y - 15), AirbusColors::CYAN, thrust_label);
+
+    // Border
+    draw_list->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), AirbusColors::AMBER, 0.0f, 0, 2.0f);
+}
+
+// Helper to draw speed tape with V-speeds and colored bands
+static void DrawSpeedTape(ImVec2 pos, ImVec2 size, float speed_knots, const BUSSData& buss, float current_pitch, float current_thrust, const VSpeeds& vspeeds) {
+    // If BUSS is active, show BUSS instead of normal speed tape
+    if (buss.active) {
+        DrawBUSS(pos, size, buss, current_pitch, current_thrust);
+        return;
+    }
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+    // Background
+    draw_list->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(20, 20, 30, 230));
+
+    float center_y = pos.y + size.y * 0.5f;
+    float pixels_per_knot = 2.0f;
+
+    // ========== Draw colored speed bands (Airbus style) ==========
+    // Red band: Below stall speed (below VLS - 5)
+    float stall_speed = vspeeds.vls - 5.0f;
+    float red_zone_top = center_y + (speed_knots - stall_speed) * pixels_per_knot;
+    if (red_zone_top < pos.y + size.y) {
+        draw_list->AddRectFilled(
+            ImVec2(pos.x + 2, clampf(red_zone_top, pos.y, pos.y + size.y)),
+            ImVec2(pos.x + size.x - 2, pos.y + size.y),
+            IM_COL32(180, 0, 0, 100)
+        );
+        // Red/black stripes
+        for (float y = clampf(red_zone_top, pos.y, pos.y + size.y); y < pos.y + size.y; y += 8.0f) {
+            draw_list->AddRectFilled(
+                ImVec2(pos.x + 2, y),
+                ImVec2(pos.x + size.x - 2, clampf(y + 4.0f, pos.y, pos.y + size.y)),
+                IM_COL32(0, 0, 0, 150)
+            );
+        }
+    }
+
+    // Amber band: Low speed awareness (VLS to VLS + 10)
+    float amber_zone_bottom = center_y + (speed_knots - vspeeds.vls) * pixels_per_knot;
+    float amber_zone_top = center_y + (speed_knots - (vspeeds.vls + 10.0f)) * pixels_per_knot;
+    draw_list->AddRectFilled(
+        ImVec2(pos.x + 2, clampf(amber_zone_top, pos.y, pos.y + size.y)),
+        ImVec2(pos.x + size.x - 2, clampf(amber_zone_bottom, pos.y, pos.y + size.y)),
+        IM_COL32(200, 120, 0, 80)
+    );
+
+    // Green band: Normal operating range (VLS + 10 to VMAX - 6)
+    float green_zone_bottom = amber_zone_top;
+    float green_zone_top = center_y + (speed_knots - (vspeeds.vmax - 6.0f)) * pixels_per_knot;
+    draw_list->AddRectFilled(
+        ImVec2(pos.x + 2, clampf(green_zone_top, pos.y, pos.y + size.y)),
+        ImVec2(pos.x + size.x - 2, clampf(green_zone_bottom, pos.y, pos.y + size.y)),
+        IM_COL32(0, 150, 0, 60)
+    );
+
+    // Red/black barber pole: Overspeed (above VMAX)
+    float overspeed_zone_bottom = center_y + (speed_knots - vspeeds.vmax) * pixels_per_knot;
+    if (overspeed_zone_bottom > pos.y) {
+        for (float y = pos.y; y < clampf(overspeed_zone_bottom, pos.y, pos.y + size.y); y += 8.0f) {
+            draw_list->AddRectFilled(
+                ImVec2(pos.x + 2, y),
+                ImVec2(pos.x + size.x - 2, clampf(y + 4.0f, pos.y, pos.y + size.y)),
+                IM_COL32(180, 0, 0, 120)
+            );
+        }
     }
 
     // Draw speed markings
-    float center_y = pos.y + size.y * 0.5f;
-    float pixels_per_knot = 2.0f;
+    float center_y_copy = center_y;
+    float pixels_per_knot_copy = pixels_per_knot;
 
     for (int spd = 0; spd <= 400; spd += 10) {
         float offset_y = center_y + (speed_knots - spd) * pixels_per_knot;
@@ -491,6 +628,74 @@ static void DrawSpeedTape(ImVec2 pos, ImVec2 size, float speed_knots, bool unrel
             2.0f
         );
     }
+
+    // ========== Draw V-speed bugs (Airbus style) ==========
+    // Helper lambda to draw a speed bug
+    auto drawSpeedBug = [&](float speed, ImU32 color, const char* label, bool is_dot = false) {
+        if (speed <= 0.0f) return;  // Skip if not set
+        float bug_y = center_y + (speed_knots - speed) * pixels_per_knot;
+        if (bug_y < pos.y || bug_y > pos.y + size.y) return;  // Off screen
+
+        if (is_dot) {
+            // Green dot - small circle
+            draw_list->AddCircleFilled(ImVec2(pos.x - 3, bug_y), 4.0f, color);
+            draw_list->AddCircle(ImVec2(pos.x - 3, bug_y), 4.0f, AirbusColors::WHITE, 0, 1.5f);
+        } else {
+            // Standard bug - triangle or line with text
+            draw_list->AddLine(ImVec2(pos.x - 8, bug_y), ImVec2(pos.x + 2, bug_y), color, 2.5f);
+            if (label && strlen(label) > 0) {
+                draw_list->AddText(ImVec2(pos.x - 18, bug_y - 7), color, label);
+            }
+        }
+    };
+
+    // VLS (Lowest Selectable) - Amber = symbol
+    if (vspeeds.vls > 0.0f) {
+        float vls_y = center_y + (speed_knots - vspeeds.vls) * pixels_per_knot;
+        if (vls_y >= pos.y && vls_y <= pos.y + size.y) {
+            draw_list->AddLine(ImVec2(pos.x - 8, vls_y - 3), ImVec2(pos.x + 2, vls_y - 3), AirbusColors::AMBER, 2.0f);
+            draw_list->AddLine(ImVec2(pos.x - 8, vls_y + 3), ImVec2(pos.x + 2, vls_y + 3), AirbusColors::AMBER, 2.0f);
+        }
+    }
+
+    // Green dot (best L/D)
+    drawSpeedBug(vspeeds.green_dot, AirbusColors::GREEN, "", true);
+
+    // V1 - Cyan circle with "1"
+    if (vspeeds.v1 > 0.0f && vspeeds.display_takeoff_speeds) {
+        float v1_y = center_y + (speed_knots - vspeeds.v1) * pixels_per_knot;
+        if (v1_y >= pos.y && v1_y <= pos.y + size.y) {
+            draw_list->AddCircleFilled(ImVec2(pos.x - 3, v1_y), 6.0f, AirbusColors::CYAN);
+            draw_list->AddCircle(ImVec2(pos.x - 3, v1_y), 6.0f, AirbusColors::WHITE, 0, 1.5f);
+            draw_list->AddText(ImVec2(pos.x - 18, v1_y - 7), AirbusColors::CYAN, "1");
+        }
+    }
+
+    // VR - Cyan dot
+    if (vspeeds.vr > 0.0f && vspeeds.display_takeoff_speeds) {
+        drawSpeedBug(vspeeds.vr, AirbusColors::CYAN, "");
+    }
+
+    // V2 - Magenta "2"
+    if (vspeeds.v2 > 0.0f && vspeeds.display_takeoff_speeds) {
+        drawSpeedBug(vspeeds.v2, AirbusColors::MAGENTA, "2");
+    }
+
+    // VAPP - Magenta triangle
+    if (vspeeds.vapp > 0.0f && vspeeds.display_approach_speeds) {
+        float vapp_y = center_y + (speed_knots - vspeeds.vapp) * pixels_per_knot;
+        if (vapp_y >= pos.y && vapp_y <= pos.y + size.y) {
+            ImVec2 tri[3] = {
+                ImVec2(pos.x - 10, vapp_y),
+                ImVec2(pos.x - 2, vapp_y - 5),
+                ImVec2(pos.x - 2, vapp_y + 5)
+            };
+            draw_list->AddTriangleFilled(tri[0], tri[1], tri[2], AirbusColors::MAGENTA);
+        }
+    }
+
+    // Border
+    draw_list->AddRect(pos, ImVec2(pos.x + size.x, pos.y + size.y), IM_COL32(100, 100, 100, 255), 0.0f, 0, 2.0f);
 
     // Current speed box
     ImVec2 box_pos = ImVec2(pos.x + size.x + 5, center_y - 15);
@@ -692,9 +897,50 @@ void DrawPFDPanel(const Sensors& sensors, const PrimCore& prim, const PilotInput
     ImVec2 horizon_center = ImVec2(canvas_pos.x + canvas_size.x * 0.5f, canvas_pos.y + canvas_size.y * 0.5f - 20);
     DrawArtificialHorizon(horizon_center, 100.0f, sensors.pitch_deg, sensors.roll_deg);
 
-    // Draw speed tape on left
+    // ========== Draw Flight Path Vector (FPV) - Green circle showing actual flight path ==========
+    if (sensors.ias_knots > 60.0f) {  // Only show FPV above 60 knots
+        // Calculate Flight Path Angle (FPA) from vertical speed and groundspeed
+        float groundspeed_fps = sensors.ias_knots * 101.269f / 60.0f;  // Convert knots to ft/sec (approximation)
+        float vs_fps = sensors.vs_fpm / 60.0f;  // Convert ft/min to ft/sec
+        float fpa_deg = atan2f(vs_fps, groundspeed_fps) * 57.2958f;  // Flight path angle in degrees
+
+        // FPV position relative to horizon center (offset by difference between pitch and FPA)
+        float pixels_per_deg = 100.0f / 15.0f;  // Horizon radius / 15 degrees
+        float fpv_offset_y = (sensors.pitch_deg - fpa_deg) * pixels_per_deg;
+
+        ImVec2 fpv_center = ImVec2(horizon_center.x, horizon_center.y + fpv_offset_y);
+
+        // Only draw if on-screen
+        if (fpv_center.y >= canvas_pos.y && fpv_center.y <= canvas_pos.y + canvas_size.y) {
+            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+            // Draw FPV symbol - green circle with horizontal wings
+            draw_list->AddCircle(fpv_center, 8.0f, AirbusColors::GREEN, 16, 2.0f);
+
+            // Horizontal wings (left and right)
+            draw_list->AddLine(
+                ImVec2(fpv_center.x - 18, fpv_center.y),
+                ImVec2(fpv_center.x - 9, fpv_center.y),
+                AirbusColors::GREEN, 2.0f
+            );
+            draw_list->AddLine(
+                ImVec2(fpv_center.x + 9, fpv_center.y),
+                ImVec2(fpv_center.x + 18, fpv_center.y),
+                AirbusColors::GREEN, 2.0f
+            );
+
+            // Vertical line at bottom (optional - some Airbus variants have this)
+            draw_list->AddLine(
+                ImVec2(fpv_center.x, fpv_center.y + 8),
+                ImVec2(fpv_center.x, fpv_center.y + 12),
+                AirbusColors::GREEN, 2.0f
+            );
+        }
+    }
+
+    // Draw speed tape on left (or BUSS if airspeed unreliable)
     ImVec2 speed_tape_pos = ImVec2(canvas_pos.x + 10, canvas_pos.y + 40);
-    DrawSpeedTape(speed_tape_pos, ImVec2(50, 300), sensors.ias_knots, faults.pitot_blocked);
+    DrawSpeedTape(speed_tape_pos, ImVec2(50, 300), sensors.ias_knots, prim.buss_data(), sensors.pitch_deg, pilot.thrust, prim.vspeeds());
 
     // Draw altitude tape on right
     ImVec2 alt_tape_pos = ImVec2(canvas_pos.x + canvas_size.x - 60, canvas_pos.y + 40);
@@ -1147,56 +1393,100 @@ void DrawSimOperationPanel(Weather& weather, Faults& faults) {
     ImGui::Separator();
     ImGui::Spacing();
 
-    // FAULT INJECTION - All faults in one place
+    // FAULT INJECTION - All faults in collapsible categories
     ImGui::TextColored(ImColor(AirbusColors::RED), "FAULT INJECTION");
+    ImGui::Separator();
 
     // Sensor faults
-    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Sensors:");
-    ImGui::Checkbox("ADR 1 Failure", &faults.adr1_fail);
-    ImGui::Checkbox("Overspeed Sensor Bad", &faults.overspeed_sensor_bad);
-
-    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Sensors")) {
+        ImGui::Checkbox("ADR 1 Failure", &faults.adr1_fail);
+        ImGui::Checkbox("Overspeed Sensor Bad", &faults.overspeed_sensor_bad);
+        ImGui::Checkbox("Pitot Blockage (Unreliable Airspeed → BUSS)", &faults.pitot_blocked);
+    }
 
     // Flight control computer faults
-    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Flight Control Computers:");
-    ImGui::Checkbox("ELAC 1 Fault", &faults.elac1_fail);
-    ImGui::Checkbox("ELAC 2 Fault", &faults.elac2_fail);
-    ImGui::Checkbox("SEC 1 Fault", &faults.sec1_fail);
-
-    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Flight Control Computers")) {
+        ImGui::Checkbox("ELAC 1 Fault", &faults.elac1_fail);
+        ImGui::Checkbox("ELAC 2 Fault", &faults.elac2_fail);
+        ImGui::Checkbox("SEC 1 Fault", &faults.sec1_fail);
+    }
 
     // Control surface faults
-    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Control Surfaces:");
-    ImGui::Checkbox("Elevator Jam", &faults.elevator_jam);
-    ImGui::Checkbox("Aileron Jam", &faults.aileron_jam);
+    if (ImGui::CollapsingHeader("Control Surfaces & Actuators")) {
+        ImGui::Checkbox("Elevator Jam", &faults.elevator_jam);
+        ImGui::Checkbox("Aileron Jam", &faults.aileron_jam);
+        ImGui::Checkbox("Elevator Left Actuator Fail", &faults.elevator_left_actuator_fail);
+        ImGui::Checkbox("Elevator Right Actuator Fail", &faults.elevator_right_actuator_fail);
+        ImGui::Checkbox("Aileron Left Actuator Fail", &faults.aileron_left_actuator_fail);
+        ImGui::Checkbox("Aileron Right Actuator Fail", &faults.aileron_right_actuator_fail);
+    }
 
-    ImGui::Spacing();
-
-    // System faults
-    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Systems:");
-    ImGui::Checkbox("Trim Runaway", &faults.trim_runaway);
-    ImGui::Checkbox("Alpha Floor Fail", &faults.alpha_floor_fail);
-
-    ImGui::Spacing();
+    // Engine failures
+    if (ImGui::CollapsingHeader("Engine Failures")) {
+        ImGui::Text("Engine 1:");
+        ImGui::Checkbox("ENG 1 N1 Sensor Fail", &faults.eng1_n1_sensor_fail);
+        ImGui::Checkbox("ENG 1 N2 Sensor Fail", &faults.eng1_n2_sensor_fail);
+        ImGui::Checkbox("ENG 1 EGT Sensor Fail", &faults.eng1_egt_sensor_fail);
+        ImGui::Checkbox("ENG 1 Vibration High", &faults.eng1_vibration_high);
+        ImGui::Checkbox("ENG 1 Oil Pressure Low", &faults.eng1_oil_pressure_low);
+        ImGui::Checkbox("ENG 1 Compressor Stall", &faults.eng1_compressor_stall);
+        ImGui::Separator();
+        ImGui::Text("Engine 2:");
+        ImGui::Checkbox("ENG 2 N1 Sensor Fail", &faults.eng2_n1_sensor_fail);
+        ImGui::Checkbox("ENG 2 N2 Sensor Fail", &faults.eng2_n2_sensor_fail);
+        ImGui::Checkbox("ENG 2 EGT Sensor Fail", &faults.eng2_egt_sensor_fail);
+        ImGui::Checkbox("ENG 2 Vibration High", &faults.eng2_vibration_high);
+        ImGui::Checkbox("ENG 2 Oil Pressure Low", &faults.eng2_oil_pressure_low);
+        ImGui::Checkbox("ENG 2 Compressor Stall", &faults.eng2_compressor_stall);
+    }
 
     // Hydraulic faults
-    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Hydraulics:");
-    ImGui::Checkbox("Green Hyd Fail", &faults.green_hyd_fail);
-    ImGui::Checkbox("Blue Hyd Fail", &faults.blue_hyd_fail);
-    ImGui::Checkbox("Yellow Hyd Fail", &faults.yellow_hyd_fail);
-
-    ImGui::Spacing();
+    if (ImGui::CollapsingHeader("Hydraulic Systems")) {
+        ImGui::Text("System Failures:");
+        ImGui::Checkbox("Green Hyd Fail (Complete)", &faults.green_hyd_fail);
+        ImGui::Checkbox("Blue Hyd Fail (Complete)", &faults.blue_hyd_fail);
+        ImGui::Checkbox("Yellow Hyd Fail (Complete)", &faults.yellow_hyd_fail);
+        ImGui::Separator();
+        ImGui::Text("Pump Failures:");
+        ImGui::Checkbox("Green Eng 1 Pump Fail", &faults.green_eng1_pump_fail);
+        ImGui::Checkbox("Blue Elec Pump Fail", &faults.blue_elec_pump_fail);
+        ImGui::Checkbox("Yellow Eng 1 Pump Fail", &faults.yellow_eng1_pump_fail);
+        ImGui::Separator();
+        ImGui::Text("Reservoir Levels:");
+        ImGui::Checkbox("Green Reservoir Low", &faults.green_reservoir_low);
+        ImGui::Checkbox("Blue Reservoir Low", &faults.blue_reservoir_low);
+        ImGui::Checkbox("Yellow Reservoir Low", &faults.yellow_reservoir_low);
+    }
 
     // Electrical faults
-    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Electrical:");
-    ImGui::Checkbox("Total Electrical Fail", &faults.total_electrical_fail);
-    ImGui::Checkbox("Partial Electrical Fail", &faults.partial_electrical_fail);
+    if (ImGui::CollapsingHeader("Electrical System")) {
+        ImGui::Text("Complete Failures:");
+        ImGui::Checkbox("Total Electrical Fail", &faults.total_electrical_fail);
+        ImGui::Checkbox("Partial Electrical Fail (AC BUS 1)", &faults.partial_electrical_fail);
+        ImGui::Separator();
+        ImGui::Text("Generators:");
+        ImGui::Checkbox("GEN 1 Fail", &faults.gen1_fail);
+        ImGui::Checkbox("GEN 2 Fail", &faults.gen2_fail);
+        ImGui::Checkbox("APU GEN Fail", &faults.apu_gen_fail);
+        ImGui::Separator();
+        ImGui::Text("Batteries:");
+        ImGui::Checkbox("BAT 1 Fail", &faults.bat1_fail);
+        ImGui::Checkbox("BAT 2 Fail", &faults.bat2_fail);
+        ImGui::Separator();
+        ImGui::Text("Buses:");
+        ImGui::Checkbox("AC BUS 1 Fail", &faults.ac_bus1_fail);
+        ImGui::Checkbox("AC BUS 2 Fail", &faults.ac_bus2_fail);
+        ImGui::Separator();
+        ImGui::Text("Emergency:");
+        ImGui::Checkbox("RAT Deployed", &faults.rat_deployed);
+        ImGui::Checkbox("RAT Fault", &faults.rat_fault);
+    }
 
-    ImGui::Spacing();
-
-    // Pitot/static faults
-    ImGui::TextColored(ImColor(AirbusColors::AMBER), "Pitot/Static:");
-    ImGui::Checkbox("Pitot Blockage", &faults.pitot_blocked);
+    // Flight control system faults
+    if (ImGui::CollapsingHeader("Flight Control Systems")) {
+        ImGui::Checkbox("Trim Runaway", &faults.trim_runaway);
+        ImGui::Checkbox("Alpha Floor Fail", &faults.alpha_floor_fail);
+    }
 
     ImGui::End();
     ImGui::PopStyleColor();
